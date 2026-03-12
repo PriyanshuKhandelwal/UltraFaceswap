@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Models (large files - use download_models.py to fetch)
+models/
+
+# Output
+*.mp4
+/tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Node
+node_modules/
+frontend/dist/
+
+# OS
+.DS_Store
+Thumbs.db

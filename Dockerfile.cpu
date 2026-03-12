@@ -1,0 +1,27 @@
+# UltraFaceswap - CPU-only (smaller, no GPU)
+FROM python:3.10-slim
+
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir \
+    torch torchvision \
+    numpy opencv-python Pillow \
+    insightface onnxruntime \
+    fastapi uvicorn python-multipart tqdm
+
+COPY backend/ backend/
+COPY run_api.py .
+COPY scripts/ scripts/
+
+RUN mkdir -p /app/models
+ENV ULTRAFACESWAP_MODELS=/app/models
+ENV ULTRAFACESWAP_OUTPUT=/tmp/output
+
+EXPOSE 8000
+
+CMD ["python", "-m", "uvicorn", "backend.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

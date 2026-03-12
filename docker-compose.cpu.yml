@@ -1,0 +1,19 @@
+# CPU-only (no GPU)
+version: "3.8"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+      - ultrafaceswap_output:/tmp/output
+    environment:
+      - ULTRAFACESWAP_MODELS=/app/models
+      - ULTRAFACESWAP_OUTPUT=/tmp/output
+
+volumes:
+  ultrafaceswap_output:

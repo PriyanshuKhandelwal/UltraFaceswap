@@ -1,0 +1,26 @@
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  --bg: #0d0f14;
+  --surface: #161a22;
+  --border: #2a3142;
+  --accent: #22d3ee;
+  --accent-dim: #0891b2;
+  --text: #e2e8f0;
+  --text-muted: #94a3b8;
+  --error: #f87171;
+}
+
+body {
+  margin: 0;
+  font-family: 'Outfit', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
