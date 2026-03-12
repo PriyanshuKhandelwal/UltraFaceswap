@@ -84,7 +84,7 @@ class FaceSwapper:
             root=models_dir,
             providers=providers,
         )
-        self.face_analysis.prepare(ctx_id=0, det_size=(320, 320))
+        self.face_analysis.prepare(ctx_id=0, det_size=(640, 640))
 
         self.face_swapper = insightface.model_zoo.get_model(model_path, providers=providers)
 
