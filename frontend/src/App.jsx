@@ -1,19 +1,48 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 
 const API_BASE = '/api'
+
+const STAGES = [
+  { id: 'extracting', label: 'Extracting frames', icon: '📂' },
+  { id: 'swapping', label: 'Swapping faces', icon: '🔄' },
+  { id: 'merging', label: 'Merging video', icon: '🎬' },
+  { id: 'done', label: 'Complete', icon: '✓' },
+]
 
 export default function App() {
   const [source, setSource] = useState(null)
   const [target, setTarget] = useState(null)
+  const [sourcePreview, setSourcePreview] = useState(null)
+  const [targetPreview, setTargetPreview] = useState(null)
   const [enhance, setEnhance] = useState(false)
   const [jobId, setJobId] = useState(null)
   const [status, setStatus] = useState(null)
   const [error, setError] = useState(null)
   const [polling, setPolling] = useState(false)
 
+  useEffect(() => {
+    if (source) {
+      const url = URL.createObjectURL(source)
+      setSourcePreview(url)
+      return () => URL.revokeObjectURL(url)
+    }
+    setSourcePreview(null)
+  }, [source])
+
+  useEffect(() => {
+    if (target) {
+      const url = URL.createObjectURL(target)
+      setTargetPreview(url)
+      return () => URL.revokeObjectURL(url)
+    }
+    setTargetPreview(null)
+  }, [target])
+
   const reset = () => {
     setSource(null)
     setTarget(null)
+    setSourcePreview(null)
+    setTargetPreview(null)
     setJobId(null)
     setStatus(null)
     setError(null)
@@ -36,7 +65,7 @@ export default function App() {
         setPolling(false)
         setError('Failed to poll status')
       }
-    }, 1500)
+    }, 1000)
   }
 
   const handleSubmit = async (e) => {
@@ -75,6 +104,12 @@ export default function App() {
     }
   }
 
+  const getCurrentStageIndex = () => {
+    const s = status?.stage || ''
+    const i = STAGES.findIndex((st) => st.id === s)
+    return i >= 0 ? i : (status?.status === 'completed' ? 3 : 0)
+  }
+
   return (
     <div style={styles.container}>
       <header style={styles.header}>
@@ -85,26 +120,49 @@ export default function App() {
       <main style={styles.main}>
         {!jobId ? (
           <form onSubmit={handleSubmit} style={styles.form}>
-            <div style={styles.uploadGroup}>
-              <label style={styles.label}>Source face (photo)</label>
-              <input
-                type="file"
-                accept="image/*"
-                onChange={(e) => setSource(e.target.files[0])}
-                style={styles.input}
-              />
-              {source && <span style={styles.fileName}>{source.name}</span>}
-            </div>
+            <div style={styles.previewRow}>
+              <div style={styles.uploadGroup}>
+                <label style={styles.label}>Source face (photo)</label>
+                <div style={styles.dropZone}>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => setSource(e.target.files[0])}
+                    style={styles.hiddenInput}
+                  />
+                  {sourcePreview ? (
+                    <img src={sourcePreview} alt="Source" style={styles.previewImg} />
+                  ) : (
+                    <span style={styles.placeholder}>+ Add photo</span>
+                  )}
+                </div>
+                {source && <span style={styles.fileName}>{source.name}</span>}
+              </div>
 
-            <div style={styles.uploadGroup}>
-              <label style={styles.label}>Target video</label>
-              <input
-                type="file"
-                accept="video/*"
-                onChange={(e) => setTarget(e.target.files[0])}
-                style={styles.input}
-              />
-              {target && <span style={styles.fileName}>{target.name}</span>}
+              <div style={styles.uploadGroup}>
+                <label style={styles.label}>Target video</label>
+                <div style={styles.dropZone}>
+                  <input
+                    type="file"
+                    accept="video/*"
+                    onChange={(e) => setTarget(e.target.files[0])}
+                    style={styles.hiddenInput}
+                  />
+                  {targetPreview ? (
+                    <video
+                      src={targetPreview}
+                      style={styles.previewVideo}
+                      muted
+                      loop
+                      playsInline
+                      onLoadedMetadata={(e) => e.target.play().catch(() => {})}
+                    />
+                  ) : (
+                    <span style={styles.placeholder}>+ Add video</span>
+                  )}
+                </div>
+                {target && <span style={styles.fileName}>{target.name}</span>}
+              </div>
             </div>
 
             <label style={styles.checkbox}>
@@ -127,31 +185,75 @@ export default function App() {
             <h2 style={styles.statusTitle}>
               {status?.status === 'completed' && 'Done!'}
               {status?.status === 'failed' && 'Failed'}
-              {(status?.status === 'pending' || status?.status === 'processing') && 'Processing...'}
+              {(status?.status === 'pending' || status?.status === 'processing') &&
+                (status?.stage === 'extracting'
+                  ? 'Extracting frames...'
+                  : status?.stage === 'swapping'
+                  ? `Swapping faces (${status?.processed_frames || 0}/${status?.total_frames || 0})`
+                  : status?.stage === 'merging'
+                  ? 'Merging video...'
+                  : 'Processing...')}
             </h2>
 
-            {status?.status === 'processing' && (
+            {(status?.status === 'processing' || status?.status === 'pending') && (
+              <div style={styles.steps}>
+                {STAGES.map((stage, i) => {
+                  const current = getCurrentStageIndex()
+                  const done = i < current || (status?.status === 'completed' && i <= current)
+                  const active = i === current && status?.status !== 'completed'
+                  return (
+                    <div
+                      key={stage.id}
+                      style={{
+                        ...styles.step,
+                        ...(active ? styles.stepActive : {}),
+                        ...(done ? styles.stepDone : {}),
+                      }}
+                    >
+                      <span style={styles.stepIcon}>{stage.icon}</span>
+                      <span style={styles.stepLabel}>{stage.label}</span>
+                      {active && i === 1 && status?.total_frames > 0 && (
+                        <span style={styles.stepDetail}>
+                          {status.processed_frames || 0} / {status.total_frames} frames
+                        </span>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
+            {(status?.status === 'processing' || status?.status === 'pending') && (
               <div style={styles.progress}>
                 <div style={styles.progressBar}>
                   <div
                     style={{
                       ...styles.progressFill,
-                      width: `${status.progress || 0}%`,
+                      width: `${status?.progress || 0}%`,
                     }}
                   />
                 </div>
-                <span style={styles.progressText}>
-                  {status.progress}% {status.total_frames > 0 && `(${status.total_frames} frames)`}
-                </span>
+                <span style={styles.progressText}>{status?.progress || 0}%</span>
               </div>
             )}
 
             {status?.error && <p style={styles.error}>{status.error}</p>}
 
             {status?.status === 'completed' && (
-              <button onClick={downloadResult} style={styles.button}>
-                Download result
-              </button>
+              <>
+                <div style={styles.resultPreview}>
+                  <video
+                    src={`${API_BASE}/result/${jobId}`}
+                    controls
+                    style={styles.resultVideo}
+                    poster=""
+                  />
+                  <p style={styles.resultHint}>Preview your result below</p>
+                </div>
+                <button onClick={downloadResult} style={styles.button}>
+                  Download result
+                </button>
+              </>
             )}
 
             <button onClick={reset} style={styles.secondaryButton}>
@@ -162,7 +264,12 @@ export default function App() {
       </main>
 
       <footer style={styles.footer}>
-        <p>Powered by InsightFace InSwapper · <a href="/docs" style={styles.link}>API docs</a></p>
+        <p>
+          Powered by InsightFace InSwapper ·{' '}
+          <a href="/docs" style={styles.link}>
+            API docs
+          </a>
+        </p>
       </footer>
     </div>
   )
@@ -170,7 +277,7 @@ export default function App() {
 
 const styles = {
   container: {
-    maxWidth: 520,
+    maxWidth: 640,
     margin: '0 auto',
     padding: '2rem 1rem',
     minHeight: '100vh',
@@ -179,7 +286,7 @@ const styles = {
   },
   header: {
     textAlign: 'center',
-    marginBottom: '2.5rem',
+    marginBottom: '2rem',
   },
   title: {
     fontSize: '1.875rem',
@@ -202,28 +309,56 @@ const styles = {
     borderRadius: 12,
     padding: '1.75rem',
   },
-  uploadGroup: {
+  previewRow: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '1rem',
     marginBottom: '1.25rem',
   },
+  uploadGroup: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.35rem',
+  },
   label: {
-    display: 'block',
-    marginBottom: '0.5rem',
     fontSize: '0.9rem',
     color: 'var(--text-muted)',
   },
-  input: {
-    width: '100%',
-    padding: '0.75rem',
+  dropZone: {
+    position: 'relative',
+    aspectRatio: '1',
     background: 'var(--bg)',
-    border: '1px solid var(--border)',
+    border: '2px dashed var(--border)',
     borderRadius: 8,
-    color: 'var(--text)',
+    overflow: 'hidden',
     cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  hiddenInput: {
+    position: 'absolute',
+    inset: 0,
+    opacity: 0,
+    cursor: 'pointer',
+    width: '100%',
+  },
+  previewImg: {
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+  },
+  previewVideo: {
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+  },
+  placeholder: {
+    color: 'var(--text-muted)',
+    fontSize: '0.9rem',
   },
   fileName: {
-    display: 'block',
-    marginTop: '0.35rem',
-    fontSize: '0.85rem',
+    fontSize: '0.8rem',
     color: 'var(--accent)',
   },
   checkbox: {
@@ -267,7 +402,42 @@ const styles = {
   },
   statusTitle: {
     marginTop: 0,
-    marginBottom: '1rem',
+    marginBottom: '1.25rem',
+    fontSize: '1.15rem',
+  },
+  steps: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.5rem',
+    marginBottom: '1.25rem',
+  },
+  step: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.6rem',
+    padding: '0.5rem 0.75rem',
+    borderRadius: 8,
+    background: 'var(--bg)',
+    opacity: 0.6,
+    transition: 'all 0.2s',
+  },
+  stepActive: {
+    opacity: 1,
+    borderLeft: '3px solid var(--accent)',
+  },
+  stepDone: {
+    opacity: 0.9,
+  },
+  stepIcon: {
+    fontSize: '1.1rem',
+  },
+  stepLabel: {
+    flex: 1,
+    fontSize: '0.9rem',
+  },
+  stepDetail: {
+    fontSize: '0.8rem',
+    color: 'var(--text-muted)',
   },
   progress: {
     marginBottom: '1rem',
@@ -280,14 +450,27 @@ const styles = {
   },
   progressFill: {
     height: '100%',
-    background: 'var(--accent)',
-    transition: 'width 0.3s',
+    background: 'linear-gradient(90deg, var(--accent), #06b6d4)',
+    transition: 'width 0.3s ease',
   },
   progressText: {
     display: 'block',
     marginTop: '0.5rem',
     fontSize: '0.85rem',
     color: 'var(--text-muted)',
+  },
+  resultPreview: {
+    marginBottom: '1rem',
+  },
+  resultVideo: {
+    width: '100%',
+    borderRadius: 8,
+    background: '#000',
+  },
+  resultHint: {
+    fontSize: '0.8rem',
+    color: 'var(--text-muted)',
+    marginTop: '0.5rem',
   },
   footer: {
     marginTop: '2rem',

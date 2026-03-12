@@ -31,7 +31,7 @@ def run_swap_task(
 ) -> None:
     """Run face swap in background thread."""
     try:
-        job_store.update(job_id, status=JobStatus.PROCESSING)
+        job_store.update(job_id, status=JobStatus.PROCESSING, stage="extracting")
 
         frames_dir, audio_path = extract_frames(target_path)
         frame_count = get_frame_count(frames_dir)
@@ -41,6 +41,7 @@ def run_swap_task(
             job_id,
             total_frames=frame_count,
             progress=5,
+            stage="swapping",
         )
 
         source_bgr = load_source_face(source_path)
@@ -59,7 +60,9 @@ def run_swap_task(
             except Exception:
                 pass
             progress = 5 + int(85 * (i + 1) / len(frame_files))
-            job_store.update(job_id, progress=progress)
+            job_store.update(job_id, progress=progress, processed_frames=i + 1)
+
+        job_store.update(job_id, stage="merging", progress=92)
 
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         output_path = os.path.join(OUTPUT_DIR, f"{job_id}.mp4")
@@ -80,6 +83,7 @@ def run_swap_task(
             job_id,
             status=JobStatus.COMPLETED,
             progress=100,
+            stage="done",
             result_path=output_path,
         )
     except Exception as e:

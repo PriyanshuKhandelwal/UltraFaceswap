@@ -21,6 +21,8 @@ class Job:
     status: JobStatus = JobStatus.PENDING
     progress: int = 0  # 0-100
     total_frames: int = 0
+    processed_frames: int = 0
+    stage: str = ""  # extracting, swapping, merging, done
     result_path: Optional[str] = None
     error: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
@@ -32,6 +34,8 @@ class Job:
             "status": self.status.value,
             "progress": self.progress,
             "total_frames": self.total_frames,
+            "processed_frames": self.processed_frames,
+            "stage": self.stage,
             "result_path": self.result_path,
             "error": self.error,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -62,6 +66,8 @@ class JobStore:
         status: Optional[JobStatus] = None,
         progress: Optional[int] = None,
         total_frames: Optional[int] = None,
+        processed_frames: Optional[int] = None,
+        stage: Optional[str] = None,
         result_path: Optional[str] = None,
         error: Optional[str] = None,
     ) -> Optional[Job]:
@@ -75,6 +81,10 @@ class JobStore:
                 job.progress = min(100, max(0, progress))
             if total_frames is not None:
                 job.total_frames = total_frames
+            if processed_frames is not None:
+                job.processed_frames = processed_frames
+            if stage is not None:
+                job.stage = stage
             if result_path is not None:
                 job.result_path = result_path
             if error is not None:
