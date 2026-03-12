@@ -21,6 +21,7 @@ from tqdm import tqdm
 from backend.core.extractor import extract_frames, get_frame_count
 from backend.core.face_swap import FaceSwapper, load_source_face
 from backend.core.enhancer import enhance_face
+from backend.core.upscaler import upscale_image
 from backend.core.merger import merge_frames_to_video, get_video_fps as _get_fps
 
 
@@ -38,6 +39,9 @@ def run_swap(
     output_path: str,
     *,
     use_enhancer: bool = False,
+    swap_model: str = "inswapper",
+    det_size: int = 640,
+    upscale: int = 1,
     temp_dir: Optional[str] = None,
 ):
     """
@@ -68,7 +72,10 @@ def run_swap(
     source_bgr = load_source_face(source_path)
 
     # Initialize face swapper
-    swapper = FaceSwapper()
+    swapper = FaceSwapper(
+        swap_model=swap_model,
+        det_size=(det_size, det_size),
+    )
 
     # Process each frame
     frame_files = sorted(Path(frames_dir).glob("frame_*.png"))
@@ -81,6 +88,8 @@ def run_swap(
             result = swapper.process_frame(source_bgr, frame_bgr)
             if use_enhancer:
                 result = enhance_face(result, use_gfpgan=True)
+            if upscale in (2, 4):
+                result = upscale_image(result, scale=upscale)
             cv2.imwrite(str(frame_path), result)
         except Exception as e:
             # Log but continue - some frames may have no faces
@@ -131,6 +140,26 @@ def main():
         help="Use GFPGAN for face restoration (optional)",
     )
     parser.add_argument(
+        "--swap-model",
+        choices=["inswapper", "simswap"],
+        default="inswapper",
+        help="InSwapper (faster) or SimSwap (sharper)",
+    )
+    parser.add_argument(
+        "--det-size",
+        type=int,
+        choices=[320, 640],
+        default=640,
+        help="Face detection size (640 for HD)",
+    )
+    parser.add_argument(
+        "--upscale",
+        type=int,
+        choices=[1, 2, 4],
+        default=1,
+        help="Upscale factor 1x, 2x, or 4x",
+    )
+    parser.add_argument(
         "--temp-dir",
         help="Directory for temporary frames (default: system temp)",
     )
@@ -148,6 +177,9 @@ def main():
         args.target,
         args.output,
         use_enhancer=args.enhance,
+        swap_model=args.swap_model,
+        det_size=args.det_size,
+        upscale=args.upscale,
         temp_dir=args.temp_dir,
     )
 

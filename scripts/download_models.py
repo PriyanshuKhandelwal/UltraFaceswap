@@ -10,8 +10,17 @@ MODELS = {
     "inswapper_128.onnx": (
         "https://huggingface.co/crw-dev/Deepinsightinswapper/resolve/26470fec58658f1abefe9fb8ae0cfd3f804701dd/inswapper_128.onnx"
     ),
+    "simswap_256.onnx": (
+        "https://huggingface.co/netrunner-exe/SimSwap-models/resolve/main/simswap_256.onnx"
+    ),
     "GFPGANv1.4.pth": (
         "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth"
+    ),
+    "RealESRGAN_x2plus.pth": (
+        "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth"
+    ),
+    "RealESRGAN_x4plus.pth": (
+        "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
     ),
 }
 

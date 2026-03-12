@@ -25,7 +25,11 @@ python scripts/download_models.py  # ~550MB for InSwapper
 python swap.py --source photo.jpg --target video.mp4 --output output.mp4
 ```
 
-Optional: `--enhance` for GFPGAN face restoration.
+Options:
+- `--enhance` – GFPGAN face restoration
+- `--swap-model inswapper|simswap` – InSwapper (faster) or SimSwap (sharper)
+- `--det-size 320|640` – Face detection size (640 for HD)
+- `--upscale 1|2|4` – Output upscaling factor
 
 ### API + Web App
 
@@ -53,10 +57,11 @@ docker-compose up --build
 ## Pipeline
 
 1. **Extract** – FFmpeg extracts frames
-2. **Detect** – InsightFace finds faces
-3. **Swap** – InSwapper replaces faces
+2. **Detect** – InsightFace finds faces (configurable 320/640)
+3. **Swap** – InSwapper 128 or SimSwap 256
 4. **Restore** (optional) – GFPGAN enhancement
-5. **Merge** – FFmpeg reassembles video + audio
+5. **Upscale** (optional) – Real-ESRGAN 2× or 4×
+6. **Merge** – FFmpeg reassembles video + audio
 
 ## Project Structure
 

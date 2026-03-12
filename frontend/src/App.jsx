@@ -15,6 +15,9 @@ export default function App() {
   const [sourcePreview, setSourcePreview] = useState(null)
   const [targetPreview, setTargetPreview] = useState(null)
   const [enhance, setEnhance] = useState(false)
+  const [swapModel, setSwapModel] = useState('inswapper')
+  const [detSize, setDetSize] = useState(640)
+  const [upscale, setUpscale] = useState(1)
   const [jobId, setJobId] = useState(null)
   const [status, setStatus] = useState(null)
   const [error, setError] = useState(null)
@@ -80,6 +83,9 @@ export default function App() {
     form.append('source', source)
     form.append('target', target)
     form.append('enhance', enhance)
+    form.append('swap_model', swapModel)
+    form.append('det_size', String(detSize))
+    form.append('upscale', String(upscale))
 
     try {
       const res = await fetch(`${API_BASE}/swap`, {
@@ -165,14 +171,67 @@ export default function App() {
               </div>
             </div>
 
-            <label style={styles.checkbox}>
-              <input
-                type="checkbox"
-                checked={enhance}
-                onChange={(e) => setEnhance(e.target.checked)}
-              />
-              Face restoration (GFPGAN)
-            </label>
+            <div style={styles.qualitySection}>
+              <h3 style={styles.qualityTitle}>Quality options</h3>
+
+              <div style={styles.option}>
+                <label style={styles.optionLabel}>Face swap model</label>
+                <select
+                  value={swapModel}
+                  onChange={(e) => setSwapModel(e.target.value)}
+                  style={styles.select}
+                >
+                  <option value="inswapper">InSwapper 128 (faster)</option>
+                  <option value="simswap">SimSwap 256 (sharper faces)</option>
+                </select>
+                <p style={styles.optionDesc}>
+                  InSwapper: quicker, good for most cases. SimSwap: sharper facial details, better for HD video.
+                </p>
+              </div>
+
+              <div style={styles.option}>
+                <label style={styles.optionLabel}>Face detection precision</label>
+                <select
+                  value={detSize}
+                  onChange={(e) => setDetSize(Number(e.target.value))}
+                  style={styles.select}
+                >
+                  <option value={320}>320 (faster)</option>
+                  <option value={640}>640 (better for HD)</option>
+                </select>
+                <p style={styles.optionDesc}>
+                  Higher values help with HD video and small faces. Use 640 for 1080p and above.
+                </p>
+              </div>
+
+              <div style={styles.option}>
+                <label style={styles.optionLabel}>Output resolution</label>
+                <select
+                  value={upscale}
+                  onChange={(e) => setUpscale(Number(e.target.value))}
+                  style={styles.select}
+                >
+                  <option value={1}>1× (original)</option>
+                  <option value={2}>2× (double size)</option>
+                  <option value={4}>4× (four times sharper)</option>
+                </select>
+                <p style={styles.optionDesc}>
+                  AI upscaling makes the video sharper. 2× or 4× improve face clarity but take longer.
+                </p>
+              </div>
+
+              <label style={styles.checkbox}>
+                <input
+                  type="checkbox"
+                  checked={enhance}
+                  onChange={(e) => setEnhance(e.target.checked)}
+                />
+                Face restoration (GFPGAN)
+              </label>
+              <p style={styles.optionDesc}>
+                Cleans up blur and improves skin texture on swapped faces.
+              </p>
+            </div>
 
             {error && <p style={styles.error}>{error}</p>}
 
@@ -361,11 +420,48 @@ const styles = {
     fontSize: '0.8rem',
     color: 'var(--accent)',
   },
+  qualitySection: {
+    marginBottom: '1rem',
+    padding: '1rem',
+    background: 'var(--bg)',
+    borderRadius: 8,
+    border: '1px solid var(--border)',
+  },
+  qualityTitle: {
+    margin: '0 0 1rem 0',
+    fontSize: '0.95rem',
+    color: 'var(--text)',
+  },
+  option: {
+    marginBottom: '1rem',
+  },
+  optionLabel: {
+    display: 'block',
+    fontSize: '0.9rem',
+    marginBottom: '0.35rem',
+    color: 'var(--text-muted)',
+  },
+  select: {
+    width: '100%',
+    padding: '0.5rem',
+    background: 'var(--surface)',
+    border: '1px solid var(--border)',
+    borderRadius: 6,
+    color: 'var(--text)',
+    fontSize: '0.9rem',
+  },
+  optionDesc: {
+    margin: '0.35rem 0 0 0',
+    fontSize: '0.8rem',
+    color: 'var(--text-muted)',
+    lineHeight: 1.4,
+  },
   checkbox: {
     display: 'flex',
     alignItems: 'center',
     gap: '0.5rem',
-    marginBottom: '1rem',
+    marginBottom: '0.35rem',
+    marginTop: '0.5rem',
     cursor: 'pointer',
     fontSize: '0.9rem',
   },

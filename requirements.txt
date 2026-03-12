@@ -13,8 +13,10 @@ insightface>=0.7.3
 onnxruntime>=1.16.0
 # For GPU: pip install onnxruntime-gpu
 
-# Face restoration (optional - install separately if needed)
+# Face restoration and upscaling (optional)
 # gfpgan>=1.3.8
+# realesrgan>=0.3.0
+# basicsr>=1.4.2
 
 # Video processing
 tqdm>=4.66.0

@@ -24,8 +24,6 @@ def enhance_face(
     """
     global _RESTORER
 
-    global _RESTORER
-
     if not use_gfpgan:
         return img_bgr
 

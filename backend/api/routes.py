@@ -14,6 +14,7 @@ from backend.queue.jobs import Job, JobStatus, job_store
 from backend.core.extractor import extract_frames, get_frame_count
 from backend.core.face_swap import FaceSwapper, load_source_face
 from backend.core.enhancer import enhance_face
+from backend.core.upscaler import upscale_image
 from backend.core.merger import merge_frames_to_video, get_video_fps
 import cv2
 
@@ -28,6 +29,9 @@ def run_swap_task(
     source_path: str,
     target_path: str,
     use_enhancer: bool = False,
+    swap_model: str = "inswapper",
+    det_size: int = 640,
+    upscale: int = 1,
 ) -> None:
     """Run face swap in background thread."""
     try:
@@ -44,8 +48,9 @@ def run_swap_task(
             stage="swapping",
         )
 
+        det_size_tuple = (det_size, det_size)
         source_bgr = load_source_face(source_path)
-        swapper = FaceSwapper()
+        swapper = FaceSwapper(swap_model=swap_model, det_size=det_size_tuple)
 
         frame_files = sorted(Path(frames_dir).glob("frame_*.png"))
         for i, frame_path in enumerate(frame_files):
@@ -56,6 +61,8 @@ def run_swap_task(
                 result = swapper.process_frame(source_bgr, frame_bgr)
                 if use_enhancer:
                     result = enhance_face(result, use_gfpgan=True)
+                if upscale in (2, 4):
+                    result = upscale_image(result, scale=upscale)
                 cv2.imwrite(str(frame_path), result)
             except Exception:
                 pass
@@ -106,6 +113,9 @@ async def create_swap_job(
     source: UploadFile = File(...),
     target: UploadFile = File(...),
     enhance: bool = Form(False),
+    swap_model: str = Form("inswapper"),
+    det_size: int = Form(640),
+    upscale: int = Form(1),
 ) -> dict:
     """
     Upload source photo and target video, start face swap job.
@@ -115,6 +125,12 @@ async def create_swap_job(
         raise HTTPException(400, "Source must be an image (jpg, png)")
     if not target.content_type or "video" not in target.content_type:
         raise HTTPException(400, "Target must be a video (mp4, webm)")
+    if swap_model not in ("inswapper", "simswap"):
+        swap_model = "inswapper"
+    if det_size not in (320, 640):
+        det_size = 640
+    if upscale not in (1, 2, 4):
+        upscale = 1
 
     job = job_store.create()
 
@@ -128,7 +144,12 @@ async def create_swap_job(
     thread = threading.Thread(
         target=run_swap_task,
         args=(job.id, source_path, target_path),
-        kwargs={"use_enhancer": enhance},
+        kwargs={
+            "use_enhancer": enhance,
+            "swap_model": swap_model,
+            "det_size": det_size,
+            "upscale": upscale,
+        },
     )
     thread.start()
 
