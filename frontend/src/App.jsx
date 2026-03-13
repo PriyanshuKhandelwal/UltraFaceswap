@@ -5,6 +5,7 @@ const API_BASE = '/api'
 const STAGES = [
   { id: 'extracting', label: 'Extracting frames', icon: '📂' },
   { id: 'swapping', label: 'Swapping faces', icon: '🔄' },
+  { id: 'interpolating', label: 'Motion smoothing', icon: '✨' },
   { id: 'merging', label: 'Merging video', icon: '🎬' },
   { id: 'done', label: 'Complete', icon: '✓' },
 ]
@@ -15,9 +16,13 @@ export default function App() {
   const [sourcePreview, setSourcePreview] = useState(null)
   const [targetPreview, setTargetPreview] = useState(null)
   const [enhance, setEnhance] = useState(false)
+  const [hairMatch, setHairMatch] = useState(true)
   const [swapModel, setSwapModel] = useState('inswapper')
   const [detSize, setDetSize] = useState(640)
   const [upscale, setUpscale] = useState(1)
+  const [interpolate, setInterpolate] = useState(1)
+  const [suggestion, setSuggestion] = useState(null)
+  const [suggestLoading, setSuggestLoading] = useState(false)
   const [jobId, setJobId] = useState(null)
   const [status, setStatus] = useState(null)
   const [error, setError] = useState(null)
@@ -41,11 +46,42 @@ export default function App() {
     setTargetPreview(null)
   }, [target])
 
+  const fetchSuggestions = async () => {
+    if (!source || !target) return
+    setSuggestLoading(true)
+    setSuggestion(null)
+    try {
+      const form = new FormData()
+      form.append('source', source)
+      form.append('target', target)
+      const res = await fetch(`${API_BASE}/suggest`, {
+        method: 'POST',
+        body: form,
+      })
+      const data = await res.json()
+      if (res.ok) setSuggestion(data)
+    } catch {
+      setSuggestion(null)
+    } finally {
+      setSuggestLoading(false)
+    }
+  }
+
+  const applySuggestion = () => {
+    if (!suggestion) return
+    setSwapModel(suggestion.swap_model)
+    setDetSize(suggestion.det_size)
+    setUpscale(suggestion.upscale)
+    setEnhance(suggestion.enhance)
+    setInterpolate(suggestion.interpolate || 1)
+  }
+
   const reset = () => {
     setSource(null)
     setTarget(null)
     setSourcePreview(null)
     setTargetPreview(null)
+    setSuggestion(null)
     setJobId(null)
     setStatus(null)
     setError(null)
@@ -83,9 +119,11 @@ export default function App() {
     form.append('source', source)
     form.append('target', target)
     form.append('enhance', enhance)
+    form.append('hair_match', hairMatch)
     form.append('swap_model', swapModel)
     form.append('det_size', String(detSize))
     form.append('upscale', String(upscale))
+    form.append('interpolate', String(interpolate))
 
     try {
       const res = await fetch(`${API_BASE}/swap`, {
@@ -103,9 +141,13 @@ export default function App() {
 
   const downloadResult = () => {
     if (jobId) {
+      const s = status?.settings || {}
+      const suffix = s.swap_model && s.det_size != null
+        ? `${s.swap_model}_d${s.det_size}_u${s.upscale || 1}_i${s.interpolate || 1}_enh${s.enhance ? 1 : 0}_hair${s.hair_match ? 1 : 0}`
+        : jobId
       const a = document.createElement('a')
       a.href = `${API_BASE}/result/${jobId}`
-      a.download = `ultrafaceswap_${jobId}.mp4`
+      a.download = `ultrafaceswap_${suffix}.mp4`
       a.click()
     }
   }
@@ -113,7 +155,7 @@ export default function App() {
   const getCurrentStageIndex = () => {
     const s = status?.stage || ''
     const i = STAGES.findIndex((st) => st.id === s)
-    return i >= 0 ? i : (status?.status === 'completed' ? 3 : 0)
+    return i >= 0 ? i : (status?.status === 'completed' ? STAGES.length - 1 : 0)
   }
 
   return (
@@ -171,6 +213,36 @@ export default function App() {
               </div>
             </div>
 
+            {source && target && (
+              <div style={styles.suggestionBox}>
+                <button
+                  type="button"
+                  onClick={fetchSuggestions}
+                  disabled={suggestLoading}
+                  style={styles.suggestBtn}
+                >
+                  {suggestLoading ? 'Analyzing...' : 'Get suggested settings'}
+                </button>
+                {suggestion && (
+                  <div style={styles.suggestionContent}>
+                    <p style={styles.suggestionMeta}>
+                      Video: {suggestion.meta?.video_width || '?'}×{suggestion.meta?.video_height || '?'} @ {suggestion.meta?.video_fps || '?'} fps
+                      {suggestion.meta?.video_frames ? ` · ${suggestion.meta.video_frames} frames` : ''}
+                    </p>
+                    <p style={styles.suggestionMeta}>
+                      Photo: {suggestion.meta?.image_width || '?'}×{suggestion.meta?.image_height || '?'}
+                    </p>
+                    <p style={styles.suggestionRec}>
+                      Suggested: {suggestion.swap_model === 'simswap' ? 'SimSwap' : 'InSwapper'} · det {suggestion.det_size} · {suggestion.upscale}× upscale · {suggestion.enhance ? 'GFPGAN on' : 'off'} · {suggestion.interpolate > 1 ? `${suggestion.interpolate}× smoother` : 'no interpolation'}
+                    </p>
+                    <button type="button" onClick={applySuggestion} style={styles.applyBtn}>
+                      Apply suggested
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div style={styles.qualitySection}>
               <h3 style={styles.qualityTitle}>Quality options</h3>
 
@@ -220,6 +292,34 @@ export default function App() {
                 </p>
               </div>
 
+              <div style={styles.option}>
+                <label style={styles.optionLabel}>Motion smoothing</label>
+                <select
+                  value={interpolate}
+                  onChange={(e) => setInterpolate(Number(e.target.value))}
+                  style={styles.select}
+                >
+                  <option value={1}>1× (original)</option>
+                  <option value={2}>2× (smoother)</option>
+                  <option value={4}>4× (very smooth)</option>
+                </select>
+                <p style={styles.optionDesc}>
+                  Inserts extra frames between existing ones for smoother playback and less flicker.
+                </p>
+              </div>
+
+              <label style={styles.checkbox}>
+                <input
+                  type="checkbox"
+                  checked={hairMatch}
+                  onChange={(e) => setHairMatch(e.target.checked)}
+                />
+                Hair color matching
+              </label>
+              <p style={styles.optionDesc}>
+                Transfer hair color from source to swapped face for more consistent look.
+              </p>
+
               <label style={styles.checkbox}>
                 <input
                   type="checkbox"
@@ -249,6 +349,8 @@ export default function App() {
                   ? 'Extracting frames...'
                   : status?.stage === 'swapping'
                   ? `Swapping faces (${status?.processed_frames || 0}/${status?.total_frames || 0})`
+                  : status?.stage === 'interpolating'
+                  ? 'Motion smoothing...'
                   : status?.stage === 'merging'
                   ? 'Merging video...'
                   : 'Processing...')}
@@ -300,6 +402,11 @@ export default function App() {
 
             {status?.status === 'completed' && (
               <>
+                {status?.settings && (
+                  <p style={styles.settingsUsed}>
+                    Settings: {status.settings.swap_model} · det {status.settings.det_size} · {status.settings.upscale}× upscale · {status.settings.interpolate}× smoother · enhance {status.settings.enhance ? 'on' : 'off'} · hair {status.settings.hair_match ? 'on' : 'off'}
+                  </p>
+                )}
                 <div style={styles.resultPreview}>
                   <video
                     src={`${API_BASE}/result/${jobId}`}
@@ -419,6 +526,45 @@ const styles = {
   fileName: {
     fontSize: '0.8rem',
     color: 'var(--accent)',
+  },
+  suggestionBox: {
+    marginBottom: '1rem',
+    padding: '1rem',
+    background: 'linear-gradient(135deg, rgba(34, 211, 238, 0.08), rgba(6, 182, 212, 0.05))',
+    borderRadius: 8,
+    border: '1px solid var(--border)',
+  },
+  suggestBtn: {
+    padding: '0.5rem 1rem',
+    background: 'transparent',
+    color: 'var(--accent)',
+    border: '1px solid var(--accent)',
+    borderRadius: 6,
+    cursor: 'pointer',
+    fontSize: '0.9rem',
+  },
+  suggestionContent: {
+    marginTop: '0.75rem',
+  },
+  suggestionMeta: {
+    margin: '0.25rem 0',
+    fontSize: '0.8rem',
+    color: 'var(--text-muted)',
+  },
+  suggestionRec: {
+    margin: '0.5rem 0',
+    fontSize: '0.85rem',
+    color: 'var(--text)',
+  },
+  applyBtn: {
+    marginTop: '0.5rem',
+    padding: '0.4rem 0.75rem',
+    background: 'var(--accent)',
+    color: 'var(--bg)',
+    border: 'none',
+    borderRadius: 6,
+    cursor: 'pointer',
+    fontSize: '0.85rem',
   },
   qualitySection: {
     marginBottom: '1rem',
@@ -562,6 +708,14 @@ const styles = {
     width: '100%',
     borderRadius: 8,
     background: '#000',
+  },
+  settingsUsed: {
+    fontSize: '0.85rem',
+    color: 'var(--text-muted)',
+    marginBottom: '0.75rem',
+    padding: '0.5rem 0.75rem',
+    background: 'var(--bg)',
+    borderRadius: 6,
   },
   resultHint: {
     fontSize: '0.8rem',

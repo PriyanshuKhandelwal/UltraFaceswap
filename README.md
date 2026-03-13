@@ -30,6 +30,7 @@ Options:
 - `--swap-model inswapper|simswap` – InSwapper (faster) or SimSwap (sharper)
 - `--det-size 320|640` – Face detection size (640 for HD)
 - `--upscale 1|2|4` – Output upscaling factor
+- `--interpolate 1|2|4` – Motion smoothing (inserts frames for less flicker)
 
 ### API + Web App
 
@@ -61,7 +62,8 @@ docker-compose up --build
 3. **Swap** – InSwapper 128 or SimSwap 256
 4. **Restore** (optional) – GFPGAN enhancement
 5. **Upscale** (optional) – Real-ESRGAN 2× or 4×
-6. **Merge** – FFmpeg reassembles video + audio
+6. **Interpolate** (optional) – Frame blending for smoother motion
+7. **Merge** – FFmpeg reassembles video + audio
 
 ## Project Structure
 

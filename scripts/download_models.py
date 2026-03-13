@@ -11,7 +11,8 @@ MODELS = {
         "https://huggingface.co/crw-dev/Deepinsightinswapper/resolve/26470fec58658f1abefe9fb8ae0cfd3f804701dd/inswapper_128.onnx"
     ),
     "simswap_256.onnx": (
-        "https://huggingface.co/netrunner-exe/SimSwap-models/resolve/main/simswap_256.onnx"
+        "https://huggingface.co/Patil/inswapper/resolve/"
+        "c4dae4118487411d40639ad36bc842c30d1a8452/simswap_256.onnx"
     ),
     "GFPGANv1.4.pth": (
         "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth"

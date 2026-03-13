@@ -18,7 +18,8 @@ INSWAPPER_MODEL_URL = (
 )
 SIMSWAP_MODEL_NAME = "simswap_256.onnx"
 SIMSWAP_MODEL_URL = (
-    "https://huggingface.co/netrunner-exe/SimSwap-models/resolve/main/simswap_256.onnx"
+    "https://huggingface.co/Patil/inswapper/resolve/"
+    "c4dae4118487411d40639ad36bc842c30d1a8452/simswap_256.onnx"
 )
 BUFFALO_L = "buffalo_l"
 
@@ -110,22 +111,40 @@ class FaceSwapper:
             self.face_swapper = insightface.model_zoo.get_model(model_path, providers=providers)
 
     def _load_simswap(self, model_path: str, providers: List[str]):
-        """Load SimSwap ONNX (256px) - uses same interface as InSwapper via InsightFace."""
+        """Load SimSwap ONNX (256px). model_zoo maps simswap->ArcFace (wrong API), use _SimSwap256 first."""
         import insightface
-        try:
-            m = insightface.model_zoo.get_model(model_path, providers=providers)
-            if m is not None:
-                return m
-        except Exception:
-            pass
         try:
             return _SimSwap256(model_path, providers)
         except Exception:
-            ensure_inswapper_model()
-            return insightface.model_zoo.get_model(
-                os.path.join(get_models_dir(), INSWAPPER_MODEL_NAME),
-                providers=providers,
-            )
+            pass
+        try:
+            m = insightface.model_zoo.get_model(model_path, providers=providers)
+            import inspect
+            sig = inspect.signature(m.get)
+            if "source_face" in str(sig) or "target_face" in str(sig):
+                return m
+        except Exception:
+            pass
+        ensure_inswapper_model()
+        return insightface.model_zoo.get_model(
+            os.path.join(get_models_dir(), INSWAPPER_MODEL_NAME),
+            providers=providers,
+        )
+
+    def _call_swapper_get(self, img: np.ndarray, target_face, source_face) -> np.ndarray:
+        """Call face_swapper.get() - compatible with both old/new InsightFace API (paste_back)."""
+        try:
+            return self.face_swapper.get(img, target_face, source_face, paste_back=True)
+        except TypeError:
+            return self.face_swapper.get(img, target_face, source_face)
+
+    def get_primary_face_bbox(self, img_bgr: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """Get bounding box (x1, y1, x2, y2) of primary face, or None."""
+        faces = self._get_faces(img_bgr, many=False)
+        if not faces:
+            return None
+        bbox = faces[0].bbox
+        return (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
 
     def _get_faces(self, img_bgr: np.ndarray, many: bool = True) -> List:
         faces = self.face_analysis.get(img_bgr)
@@ -150,7 +169,7 @@ class FaceSwapper:
             return target_img
         source_face = source_faces[min(source_index, len(source_faces) - 1)]
         target_face = target_faces[min(target_index, len(target_faces) - 1)]
-        return self.face_swapper.get(target_img, target_face, source_face, paste_back=True)
+        return self._call_swapper_get(target_img, target_face, source_face)
 
     def swap_all_faces(
         self,
@@ -166,7 +185,7 @@ class FaceSwapper:
         result = copy.deepcopy(target_img)
         source_face = source_faces[0]
         for target_face in target_faces:
-            result = self.face_swapper.get(result, target_face, source_face, paste_back=True)
+            result = self._call_swapper_get(result, target_face, source_face)
         return result
 
     def process_frame(
@@ -210,12 +229,16 @@ class _SimSwap256:
         bgr_fake = cv2.warpAffine(bgr_fake, IM, (img.shape[1], img.shape[0]), borderValue=0.0)
         mask = np.ones((self.input_size, self.input_size), dtype=np.float32)
         mask = cv2.warpAffine(mask, IM, (img.shape[1], img.shape[0]), borderValue=0.0)
+        # Strengthen mask to avoid ghosting (warp interpolation can dilute values)
+        mask = np.clip(mask * 1.3, 0, 1)
         mask = np.expand_dims(mask, 2)
-        result = (mask * bgr_fake + (1 - mask) * img.astype(np.float32)).astype(np.uint8)
+        img_float = img.astype(np.float32)
+        result = (mask * bgr_fake.astype(np.float32) + (1 - mask) * img_float).astype(np.uint8)
         return result
 
 
 def load_source_face(source_path: str) -> np.ndarray:
     """Load source image as BGR numpy array."""
     img = Image.open(source_path)
+    img = img.convert("RGB")
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)

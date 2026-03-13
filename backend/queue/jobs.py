@@ -25,6 +25,7 @@ class Job:
     stage: str = ""  # extracting, swapping, merging, done
     result_path: Optional[str] = None
     error: Optional[str] = None
+    settings: Optional[Dict[str, Any]] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -38,6 +39,7 @@ class Job:
             "stage": self.stage,
             "result_path": self.result_path,
             "error": self.error,
+            "settings": self.settings,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -70,6 +72,7 @@ class JobStore:
         stage: Optional[str] = None,
         result_path: Optional[str] = None,
         error: Optional[str] = None,
+        settings: Optional[Dict[str, Any]] = None,
     ) -> Optional[Job]:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -89,6 +92,8 @@ class JobStore:
                 job.result_path = result_path
             if error is not None:
                 job.error = error
+            if settings is not None:
+                job.settings = settings
             job.updated_at = datetime.utcnow()
             return job
 
