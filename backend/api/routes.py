@@ -19,6 +19,7 @@ from backend.core.interpolator import interpolate_frames
 from backend.core.merger import merge_frames_to_video, get_video_fps
 from backend.core.analyzer import suggest_settings
 from backend.core.hair import apply_hair_color_matching
+from backend.core.facefusion_runner import run_facefusion, is_facefusion_available
 import cv2
 
 router = APIRouter(prefix="/api", tags=["face-swap"])
@@ -27,24 +28,120 @@ router = APIRouter(prefix="/api", tags=["face-swap"])
 OUTPUT_DIR = os.environ.get("ULTRAFACESWAP_OUTPUT", "/tmp/ultrafaceswap_output")
 
 
-def _settings_suffix(swap_model: str, det_size: int, upscale: int, interpolate: int, enhance: bool, hair_match: bool) -> str:
-    """Short settings string for filenames: model_d640_u1_i1_enh0_hair1"""
+@router.get("/capabilities")
+async def get_capabilities() -> dict:
+    """Return available engines. FaceFusion requires separate install + FACEFUSION_PATH."""
+    return {
+        "classic": True,
+        "facefusion": is_facefusion_available(),
+    }
+
+
+def _settings_suffix(
+    swap_model: str,
+    det_size: int,
+    upscale: int,
+    interpolate: int,
+    enhance: bool,
+    hair_match: bool,
+    engine: str = "classic",
+    facefusion_model: str = "",
+    facefusion_pixel_boost: str = "",
+) -> str:
+    """Short settings string for filenames: model_d640_u1_i1_enh0_hair1 or facefusion_inswapper128_p128"""
+    if engine == "facefusion":
+        return f"facefusion_{facefusion_model}_p{facefusion_pixel_boost}"
     return f"{swap_model}_d{det_size}_u{upscale}_i{interpolate}_enh{1 if enhance else 0}_hair{1 if hair_match else 0}"
+
+
+def _run_facefusion_task(
+    job_id: str,
+    source_path: str,
+    target_path: str,
+    facefusion_model: str = "inswapper_128_fp16",
+    facefusion_pixel_boost: str = "128",
+    facefusion_face_enhancer: bool = False,
+    facefusion_lip_sync: bool = False,
+) -> None:
+    """Run FaceFusion subprocess for face swap."""
+    if not is_facefusion_available():
+        job_store.update(job_id, status=JobStatus.FAILED, error="FaceFusion not configured. Set ULTRAFACESWAP_FACEFUSION_PATH.")
+        for p in [source_path, target_path]:
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+        return
+
+    job_store.update(job_id, status=JobStatus.PROCESSING, stage="swapping")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    output_path = os.path.join(OUTPUT_DIR, f"{job_id}.mp4")
+
+    try:
+        run_facefusion(
+            source_path,
+            target_path,
+            output_path,
+            face_swapper_model=facefusion_model,
+            face_swapper_pixel_boost=facefusion_pixel_boost,
+            face_enhancer_blend=0.5 if facefusion_face_enhancer else 0.0,
+            lip_sync=facefusion_lip_sync,
+        )
+        settings = {
+            "engine": "facefusion",
+            "facefusion_model": facefusion_model,
+            "facefusion_pixel_boost": facefusion_pixel_boost,
+            "facefusion_face_enhancer": facefusion_face_enhancer,
+            "facefusion_lip_sync": facefusion_lip_sync,
+        }
+        job_store.update(
+            job_id,
+            status=JobStatus.COMPLETED,
+            progress=100,
+            stage="done",
+            result_path=output_path,
+            settings=settings,
+        )
+    except Exception as e:
+        job_store.update(job_id, status=JobStatus.FAILED, error=str(e))
+    finally:
+        for p in [source_path, target_path]:
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
 
 def run_swap_task(
     job_id: str,
     source_path: str,
     target_path: str,
+    engine: str = "classic",
     use_enhancer: bool = False,
     swap_model: str = "inswapper",
     det_size: int = 640,
     upscale: int = 1,
     interpolate: int = 1,
     hair_match: bool = True,
+    facefusion_model: str = "inswapper_128_fp16",
+    facefusion_pixel_boost: str = "128",
+    facefusion_face_enhancer: bool = False,
+    facefusion_lip_sync: bool = False,
 ) -> None:
     """Run face swap in background thread."""
     try:
+        if engine == "facefusion":
+            _run_facefusion_task(
+                job_id, source_path, target_path,
+                facefusion_model=facefusion_model,
+                facefusion_pixel_boost=facefusion_pixel_boost,
+                facefusion_face_enhancer=facefusion_face_enhancer,
+                facefusion_lip_sync=facefusion_lip_sync,
+            )
+            return
+
         job_store.update(job_id, status=JobStatus.PROCESSING, stage="extracting")
 
         frames_dir, audio_path = extract_frames(target_path)
@@ -114,6 +211,7 @@ def run_swap_task(
         os.remove(target_path)
 
         settings = {
+            "engine": "classic",
             "swap_model": swap_model,
             "det_size": det_size,
             "upscale": upscale,
@@ -179,12 +277,17 @@ async def suggest_settings_endpoint(
 async def create_swap_job(
     source: UploadFile = File(...),
     target: UploadFile = File(...),
+    engine: str = Form("classic"),
     enhance: bool = Form(False),
     swap_model: str = Form("inswapper"),
     det_size: int = Form(640),
     upscale: int = Form(1),
     interpolate: int = Form(1),
     hair_match: bool = Form(True),
+    facefusion_model: str = Form("inswapper_128_fp16"),
+    facefusion_pixel_boost: str = Form("128"),
+    facefusion_face_enhancer: bool = Form(False),
+    facefusion_lip_sync: bool = Form(False),
 ) -> dict:
     """
     Upload source photo and target video, start face swap job.
@@ -194,6 +297,10 @@ async def create_swap_job(
         raise HTTPException(400, "Source must be an image (jpg, png)")
     if not target.content_type or "video" not in target.content_type:
         raise HTTPException(400, "Target must be a video (mp4, webm)")
+    if engine not in ("classic", "facefusion"):
+        engine = "classic"
+    if engine == "facefusion" and not is_facefusion_available():
+        raise HTTPException(400, "FaceFusion not available. Install FaceFusion and set ULTRAFACESWAP_FACEFUSION_PATH.")
     if swap_model not in ("inswapper", "simswap"):
         swap_model = "inswapper"
     if det_size not in (320, 640):
@@ -216,12 +323,17 @@ async def create_swap_job(
         target=run_swap_task,
         args=(job.id, source_path, target_path),
         kwargs={
+            "engine": engine,
             "use_enhancer": enhance,
             "swap_model": swap_model,
             "det_size": det_size,
             "upscale": upscale,
             "interpolate": interpolate,
             "hair_match": hair_match,
+            "facefusion_model": facefusion_model,
+            "facefusion_pixel_boost": facefusion_pixel_boost,
+            "facefusion_face_enhancer": facefusion_face_enhancer,
+            "facefusion_lip_sync": facefusion_lip_sync,
         },
     )
     thread.start()
@@ -254,14 +366,23 @@ async def get_result(job_id: str):
         raise HTTPException(404, "Result file not found")
 
     s = job.settings or {}
-    suffix = _settings_suffix(
-        s.get("swap_model", "inswapper"),
-        s.get("det_size", 640),
-        s.get("upscale", 1),
-        s.get("interpolate", 1),
-        s.get("enhance", False),
-        s.get("hair_match", True),
-    )
+    engine = s.get("engine", "classic")
+    if engine == "facefusion":
+        suffix = _settings_suffix(
+            "", 0, 1, 1, False, True,
+            engine="facefusion",
+            facefusion_model=s.get("facefusion_model", "inswapper_128_fp16"),
+            facefusion_pixel_boost=s.get("facefusion_pixel_boost", "128"),
+        )
+    else:
+        suffix = _settings_suffix(
+            s.get("swap_model", "inswapper"),
+            s.get("det_size", 640),
+            s.get("upscale", 1),
+            s.get("interpolate", 1),
+            s.get("enhance", False),
+            s.get("hair_match", True),
+        )
     filename = f"ultrafaceswap_{suffix}.mp4"
     return FileResponse(
         job.result_path,

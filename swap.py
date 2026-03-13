@@ -17,6 +17,13 @@ from typing import Optional
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+# Load .env for ULTRAFACESWAP_FACEFUSION_PATH
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass
+
 import cv2
 from tqdm import tqdm
 
@@ -27,6 +34,7 @@ from backend.core.upscaler import upscale_image
 from backend.core.interpolator import interpolate_frames
 from backend.core.merger import merge_frames_to_video, get_video_fps as _get_fps
 from backend.core.hair import apply_hair_color_matching
+from backend.core.facefusion_runner import run_facefusion, is_facefusion_available
 
 
 def settings_suffix(swap_model: str, det_size: int, upscale: int, interpolate: int, enhance: bool, hair_match: bool) -> str:
@@ -224,6 +232,47 @@ def main():
         "--output-dir",
         help="Output directory for test-all mode (default: current dir)",
     )
+    parser.add_argument(
+        "--engine",
+        choices=["classic", "facefusion"],
+        default="classic",
+        help="Engine: classic (InSwapper/SimSwap) or facefusion (requires install)",
+    )
+    parser.add_argument(
+        "--facefusion-model",
+        default="inswapper_128_fp16",
+        help="FaceFusion face swapper model (when --engine facefusion)",
+    )
+    parser.add_argument(
+        "--facefusion-pixel-boost",
+        choices=["128", "256", "512"],
+        default="128",
+        help="FaceFusion pixel boost (when --engine facefusion)",
+    )
+    parser.add_argument(
+        "--facefusion-enhance",
+        action="store_true",
+        help="Enable FaceFusion face enhancer",
+    )
+    parser.add_argument(
+        "--facefusion-lip-sync",
+        action="store_true",
+        help="Enable FaceFusion lip sync",
+    )
+    parser.add_argument(
+        "--test-all-facefusion",
+        action="store_true",
+        help="Run all FaceFusion combinations; use --output-dir to set folder (default: facefusion_output)",
+    )
+    parser.add_argument(
+        "--facefusion-lip",
+        action="store_true",
+        help="In test-all-facefusion, include lip sync combos (extracts audio from target video)",
+    )
+    parser.add_argument(
+        "--source-audio",
+        help="Audio file for lip sync (when --facefusion-lip-sync); if omitted, extracted from target video",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.source):
@@ -232,6 +281,59 @@ def main():
     if not os.path.exists(args.target):
         print(f"Error: Target video not found: {args.target}")
         sys.exit(1)
+
+    if args.engine == "facefusion" or args.test_all_facefusion:
+        if not is_facefusion_available():
+            print("Error: FaceFusion not configured. Set ULTRAFACESWAP_FACEFUSION_PATH to the FaceFusion repo root.")
+            sys.exit(1)
+        if args.test_all_facefusion:
+            out_dir = Path(args.output_dir or "facefusion_output")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            lip_opts = [False, True] if getattr(args, "facefusion_lip", False) else [False]
+            grid = list(itertools.product(
+                ["inswapper_128_fp16", "inswapper_128", "simswap_256", "hyperswap_1a_256", "blendswap_256"],
+                ["128", "256", "512"],
+                [False, True],
+                lip_opts,
+            ))
+            lip_str = " (incl. lip sync via target audio)" if lip_opts else ""
+            print(f"Running {len(grid)} FaceFusion combinations{lip_str}...")
+            failed = 0
+            for i, (model, px, enh, lip) in enumerate(grid):
+                suffix = f"{model}_p{px}_enh{1 if enh else 0}_lip{1 if lip else 0}"
+                output_path = str(out_dir / f"ff_{suffix}.mp4")
+                print(f"\n[{i+1}/{len(grid)}] model={model} · pixel={px} · enhance={'on' if enh else 'off'} · lip={'on' if lip else 'off'}")
+                try:
+                    run_facefusion(
+                        args.source,
+                        args.target,
+                        output_path,
+                        face_swapper_model=model,
+                        face_swapper_pixel_boost=px,
+                        face_enhancer_blend=0.5 if enh else 0.0,
+                        lip_sync=lip,
+                        source_audio_path=None,  # extract from target when lip_sync=True
+                    )
+                    print(f"  Saved: {output_path}")
+                except Exception as e:
+                    failed += 1
+                    print(f"  Failed: {e}")
+            print(f"\nDone. Outputs in {out_dir.absolute()}" + (f" ({failed} failed)" if failed else ""))
+        else:
+            print("Running FaceFusion...")
+            run_facefusion(
+                args.source,
+                args.target,
+                args.output,
+                face_swapper_model=args.facefusion_model,
+                face_swapper_pixel_boost=args.facefusion_pixel_boost,
+                face_enhancer_blend=0.5 if args.facefusion_enhance else 0.0,
+                lip_sync=args.facefusion_lip_sync,
+                source_audio_path=getattr(args, "source_audio", None),
+            )
+            print(f"Done. Output saved to {args.output}")
+            print(f"Settings: engine=facefusion · model={args.facefusion_model} · pixel={args.facefusion_pixel_boost}")
+        return
 
     if args.test_all:
         # All combinations: swap_model, det_size, enhance, hair_match (16 total)

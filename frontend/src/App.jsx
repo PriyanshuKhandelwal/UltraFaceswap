@@ -15,12 +15,18 @@ export default function App() {
   const [target, setTarget] = useState(null)
   const [sourcePreview, setSourcePreview] = useState(null)
   const [targetPreview, setTargetPreview] = useState(null)
+  const [engine, setEngine] = useState('classic')
+  const [capabilities, setCapabilities] = useState({ classic: true, facefusion: false })
   const [enhance, setEnhance] = useState(false)
   const [hairMatch, setHairMatch] = useState(true)
   const [swapModel, setSwapModel] = useState('inswapper')
   const [detSize, setDetSize] = useState(640)
   const [upscale, setUpscale] = useState(1)
   const [interpolate, setInterpolate] = useState(1)
+  const [facefusionModel, setFacefusionModel] = useState('inswapper_128_fp16')
+  const [facefusionPixelBoost, setFacefusionPixelBoost] = useState('128')
+  const [facefusionFaceEnhancer, setFacefusionFaceEnhancer] = useState(false)
+  const [facefusionLipSync, setFacefusionLipSync] = useState(false)
   const [suggestion, setSuggestion] = useState(null)
   const [suggestLoading, setSuggestLoading] = useState(false)
   const [jobId, setJobId] = useState(null)
@@ -45,6 +51,13 @@ export default function App() {
     }
     setTargetPreview(null)
   }, [target])
+
+  useEffect(() => {
+    fetch(`${API_BASE}/capabilities`)
+      .then((r) => r.json())
+      .then(setCapabilities)
+      .catch(() => setCapabilities({ classic: true, facefusion: false }))
+  }, [])
 
   const fetchSuggestions = async () => {
     if (!source || !target) return
@@ -118,12 +131,17 @@ export default function App() {
     const form = new FormData()
     form.append('source', source)
     form.append('target', target)
+    form.append('engine', engine)
     form.append('enhance', enhance)
     form.append('hair_match', hairMatch)
     form.append('swap_model', swapModel)
     form.append('det_size', String(detSize))
     form.append('upscale', String(upscale))
     form.append('interpolate', String(interpolate))
+    form.append('facefusion_model', facefusionModel)
+    form.append('facefusion_pixel_boost', facefusionPixelBoost)
+    form.append('facefusion_face_enhancer', facefusionFaceEnhancer)
+    form.append('facefusion_lip_sync', facefusionLipSync)
 
     try {
       const res = await fetch(`${API_BASE}/swap`, {
@@ -142,9 +160,14 @@ export default function App() {
   const downloadResult = () => {
     if (jobId) {
       const s = status?.settings || {}
-      const suffix = s.swap_model && s.det_size != null
-        ? `${s.swap_model}_d${s.det_size}_u${s.upscale || 1}_i${s.interpolate || 1}_enh${s.enhance ? 1 : 0}_hair${s.hair_match ? 1 : 0}`
-        : jobId
+      let suffix
+      if (s.engine === 'facefusion') {
+        suffix = `facefusion_${s.facefusion_model || 'inswapper_128_fp16'}_p${s.facefusion_pixel_boost || '128'}`
+      } else {
+        suffix = s.swap_model && s.det_size != null
+          ? `${s.swap_model}_d${s.det_size}_u${s.upscale || 1}_i${s.interpolate || 1}_enh${s.enhance ? 1 : 0}_hair${s.hair_match ? 1 : 0}`
+          : jobId
+      }
       const a = document.createElement('a')
       a.href = `${API_BASE}/result/${jobId}`
       a.download = `ultrafaceswap_${suffix}.mp4`
@@ -213,7 +236,29 @@ export default function App() {
               </div>
             </div>
 
-            {source && target && (
+            <div style={styles.engineTabs}>
+              <button
+                type="button"
+                style={{ ...styles.engineTab, ...(engine === 'classic' ? styles.engineTabActive : {}) }}
+                onClick={() => setEngine('classic')}
+              >
+                Classic
+              </button>
+              <button
+                type="button"
+                style={{
+                  ...styles.engineTab,
+                  ...(engine === 'facefusion' ? styles.engineTabActive : {}),
+                  ...(!capabilities.facefusion ? styles.engineTabDisabled : {}),
+                }}
+                onClick={() => capabilities.facefusion && setEngine('facefusion')}
+                title={!capabilities.facefusion ? 'Install FaceFusion and set ULTRAFACESWAP_FACEFUSION_PATH to enable' : ''}
+              >
+                FaceFusion {!capabilities.facefusion && '(unavailable)'}
+              </button>
+            </div>
+
+            {source && target && engine === 'classic' && (
               <div style={styles.suggestionBox}>
                 <button
                   type="button"
@@ -244,8 +289,12 @@ export default function App() {
             )}
 
             <div style={styles.qualitySection}>
-              <h3 style={styles.qualityTitle}>Quality options</h3>
+              <h3 style={styles.qualityTitle}>
+                {engine === 'classic' ? 'Classic options' : 'FaceFusion options'}
+              </h3>
 
+              {engine === 'classic' && (
+              <>
               <div style={styles.option}>
                 <label style={styles.optionLabel}>Face swap model</label>
                 <select
@@ -331,6 +380,56 @@ export default function App() {
               <p style={styles.optionDesc}>
                 Cleans up blur and improves skin texture on swapped faces.
               </p>
+              </>
+              )}
+
+              {engine === 'facefusion' && (
+              <>
+              <p style={styles.optionDesc}>Requires FaceFusion installed. Set ULTRAFACESWAP_FACEFUSION_PATH.</p>
+              <div style={styles.option}>
+                <label style={styles.optionLabel}>Face swapper model</label>
+                <select
+                  value={facefusionModel}
+                  onChange={(e) => setFacefusionModel(e.target.value)}
+                  style={styles.select}
+                >
+                  <option value="inswapper_128_fp16">InSwapper 128 FP16</option>
+                  <option value="inswapper_128">InSwapper 128</option>
+                  <option value="simswap_256">SimSwap 256</option>
+                  <option value="hyperswap_1a_256">HyperSwap 1A 256</option>
+                  <option value="blendswap_256">BlendSwap 256</option>
+                </select>
+              </div>
+              <div style={styles.option}>
+                <label style={styles.optionLabel}>Pixel boost</label>
+                <select
+                  value={facefusionPixelBoost}
+                  onChange={(e) => setFacefusionPixelBoost(e.target.value)}
+                  style={styles.select}
+                >
+                  <option value="128">128 (fastest)</option>
+                  <option value="256">256</option>
+                  <option value="512">512 (best quality)</option>
+                </select>
+              </div>
+              <label style={styles.checkbox}>
+                <input
+                  type="checkbox"
+                  checked={facefusionFaceEnhancer}
+                  onChange={(e) => setFacefusionFaceEnhancer(e.target.checked)}
+                />
+                Face enhancer
+              </label>
+              <label style={styles.checkbox}>
+                <input
+                  type="checkbox"
+                  checked={facefusionLipSync}
+                  onChange={(e) => setFacefusionLipSync(e.target.checked)}
+                />
+                Lip sync
+              </label>
+              </>
+              )}
             </div>
 
             {error && <p style={styles.error}>{error}</p>}
@@ -404,7 +503,9 @@ export default function App() {
               <>
                 {status?.settings && (
                   <p style={styles.settingsUsed}>
-                    Settings: {status.settings.swap_model} · det {status.settings.det_size} · {status.settings.upscale}× upscale · {status.settings.interpolate}× smoother · enhance {status.settings.enhance ? 'on' : 'off'} · hair {status.settings.hair_match ? 'on' : 'off'}
+                    {status.settings.engine === 'facefusion'
+                      ? `Settings: engine=FaceFusion · model=${status.settings.facefusion_model || 'inswapper_128_fp16'} · pixel=${status.settings.facefusion_pixel_boost || '128'} · enhance ${status.settings.facefusion_face_enhancer ? 'on' : 'off'} · lip sync ${status.settings.facefusion_lip_sync ? 'on' : 'off'}`
+                      : `Settings: engine=Classic · ${status.settings.swap_model} · det ${status.settings.det_size} · ${status.settings.upscale}× upscale · ${status.settings.interpolate}× smoother · enhance ${status.settings.enhance ? 'on' : 'off'} · hair ${status.settings.hair_match ? 'on' : 'off'}`}
                   </p>
                 )}
                 <div style={styles.resultPreview}>
@@ -526,6 +627,31 @@ const styles = {
   fileName: {
     fontSize: '0.8rem',
     color: 'var(--accent)',
+  },
+  engineTabs: {
+    display: 'flex',
+    gap: 0,
+    marginBottom: '1rem',
+    border: '1px solid var(--border)',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  engineTab: {
+    flex: 1,
+    padding: '0.6rem 1rem',
+    background: 'var(--bg)',
+    border: 'none',
+    cursor: 'pointer',
+    fontSize: '0.9rem',
+    color: 'var(--text-muted)',
+  },
+  engineTabActive: {
+    background: 'var(--accent)',
+    color: 'var(--bg)',
+  },
+  engineTabDisabled: {
+    opacity: 0.6,
+    cursor: 'not-allowed',
   },
   suggestionBox: {
     marginBottom: '1rem',

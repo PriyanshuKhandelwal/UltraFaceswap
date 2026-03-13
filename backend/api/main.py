@@ -1,5 +1,14 @@
 """FastAPI application for UltraFaceswap."""
 
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    root = Path(__file__).resolve().parent.parent.parent
+    load_dotenv(root / ".env")
+except ImportError:
+    pass
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 

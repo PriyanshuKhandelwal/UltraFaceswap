@@ -26,11 +26,13 @@ python swap.py --source photo.jpg --target video.mp4 --output output.mp4
 ```
 
 Options:
-- `--enhance` – GFPGAN face restoration
+- `--engine classic|facefusion` – Classic (InSwapper/SimSwap) or FaceFusion (optional, see below)
+- `--enhance` – GFPGAN face restoration (classic)
 - `--swap-model inswapper|simswap` – InSwapper (faster) or SimSwap (sharper)
 - `--det-size 320|640` – Face detection size (640 for HD)
 - `--upscale 1|2|4` – Output upscaling factor
 - `--interpolate 1|2|4` – Motion smoothing (inserts frames for less flicker)
+- `--test-all` – Run all setting combinations, save to `--output-dir`
 
 ### API + Web App
 
@@ -55,7 +57,29 @@ docker run -p 8000:8000 -v $(pwd)/models:/app/models ultrafaceswap
 docker-compose up --build
 ```
 
-## Pipeline
+## Optional: FaceFusion Engine
+
+For higher-quality results, you can use [FaceFusion](https://github.com/facefusion/facefusion) as an alternative engine. FaceFusion offers additional models (e.g. hyperswap, blendswap), face enhancement, and lip-sync.
+
+1. Install FaceFusion following its [official docs](https://docs.facefusion.io/installation) (requires Python 3.12, conda recommended).
+2. Clone the repo and run its install script.
+3. Set the path to the FaceFusion repo (use either method):
+   ```bash
+   export ULTRAFACESWAP_FACEFUSION_PATH=/path/to/facefusion
+   ```
+   Or add to `.env` in the project root:
+   ```
+   ULTRAFACESWAP_FACEFUSION_PATH=/path/to/facefusion
+   ```
+4. Use FaceFusion in the CLI:
+   ```bash
+   python swap.py -s photo.jpg -t video.mp4 -o out.mp4 --engine facefusion
+   ```
+5. In the web app, select the "FaceFusion" tab when available.
+
+FaceFusion is optional; the Classic engine works out of the box.
+
+## Pipeline (Classic)
 
 1. **Extract** – FFmpeg extracts frames
 2. **Detect** – InsightFace finds faces (configurable 320/640)

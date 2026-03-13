@@ -7,6 +7,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+# Load .env if present (for ULTRAFACESWAP_FACEFUSION_PATH, etc.)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass
+
 if __name__ == "__main__":
     import uvicorn
     reload = os.environ.get("ULTRAFACESWAP_RELOAD", "false").lower() == "true"

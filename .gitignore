@@ -6,6 +6,9 @@ __pycache__/
 venv/
 env/
 
+# Environment (copy .env.example to .env)
+.env
+
 # Models (large files - use download_models.py to fetch)
 models/
 
