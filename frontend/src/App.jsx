@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 
 const API_BASE = '/api'
 
@@ -33,6 +33,11 @@ export default function App() {
   const [status, setStatus] = useState(null)
   const [error, setError] = useState(null)
   const [polling, setPolling] = useState(false)
+  const autoDownloadedJobIdRef = useRef(null)
+  const [mainTab, setMainTab] = useState('standard')
+  const [multiSources, setMultiSources] = useState([])
+  const [multiTarget, setMultiTarget] = useState(null)
+  const [multiTargetPreview, setMultiTargetPreview] = useState(null)
 
   useEffect(() => {
     if (source) {
@@ -51,6 +56,15 @@ export default function App() {
     }
     setTargetPreview(null)
   }, [target])
+
+  useEffect(() => {
+    if (multiTarget) {
+      const url = URL.createObjectURL(multiTarget)
+      setMultiTargetPreview(url)
+      return () => URL.revokeObjectURL(url)
+    }
+    setMultiTargetPreview(null)
+  }, [multiTarget])
 
   useEffect(() => {
     fetch(`${API_BASE}/capabilities`)
@@ -95,10 +109,14 @@ export default function App() {
     setSourcePreview(null)
     setTargetPreview(null)
     setSuggestion(null)
+    setMultiSources([])
+    setMultiTarget(null)
+    setMultiTargetPreview(null)
     setJobId(null)
     setStatus(null)
     setError(null)
     setPolling(false)
+    autoDownloadedJobIdRef.current = null
   }
 
   const pollStatus = async (id) => {
@@ -157,11 +175,44 @@ export default function App() {
     }
   }
 
+  const handleSubmitMulti = async (e) => {
+    e.preventDefault()
+    setError(null)
+    if (multiSources.length < 1 || multiSources.length > 5) {
+      setError('Upload 1 to 5 source images')
+      return
+    }
+    if (!multiTarget) {
+      setError('Upload target video')
+      return
+    }
+    const form = new FormData()
+    multiSources.forEach((file) => form.append('sources', file))
+    form.append('target', multiTarget)
+    try {
+      const res = await fetch(`${API_BASE}/swap-multi`, {
+        method: 'POST',
+        body: form,
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        const msg = Array.isArray(data.detail) ? data.detail.map((d) => d.msg || d.loc?.join('.')).join(' ') : (data.detail || 'Upload failed')
+        throw new Error(typeof msg === 'string' ? msg : 'Upload failed')
+      }
+      setJobId(data.job_id)
+      pollStatus(data.job_id)
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
   const downloadResult = () => {
     if (jobId) {
       const s = status?.settings || {}
       let suffix
-      if (s.engine === 'facefusion') {
+      if (s.multi_angle) {
+        suffix = `facefusion_hyperswap_1a_256_p256_multi`
+      } else if (s.engine === 'facefusion') {
         suffix = `facefusion_${s.facefusion_model || 'inswapper_128_fp16'}_p${s.facefusion_pixel_boost || '128'}`
       } else {
         suffix = s.swap_model && s.det_size != null
@@ -174,6 +225,13 @@ export default function App() {
       a.click()
     }
   }
+
+  useEffect(() => {
+    if (status?.status === 'completed' && jobId && autoDownloadedJobIdRef.current !== jobId) {
+      autoDownloadedJobIdRef.current = jobId
+      downloadResult()
+    }
+  }, [status?.status, jobId])
 
   const getCurrentStageIndex = () => {
     const s = status?.stage || ''
@@ -190,6 +248,33 @@ export default function App() {
 
       <main style={styles.main}>
         {!jobId ? (
+          <>
+            <div style={styles.mainTabs}>
+              <button
+                type="button"
+                style={{
+                  ...styles.mainTab,
+                  ...(mainTab === 'standard' ? styles.mainTabActive : {}),
+                }}
+                onClick={() => setMainTab('standard')}
+              >
+                Standard
+              </button>
+              <button
+                type="button"
+                style={{
+                  ...styles.mainTab,
+                  ...(mainTab === 'multiangle' ? styles.mainTabActive : {}),
+                  ...(!capabilities.facefusion ? styles.engineTabDisabled : {}),
+                }}
+                onClick={() => capabilities.facefusion && setMainTab('multiangle')}
+                title={!capabilities.facefusion ? 'FaceFusion required' : ''}
+              >
+                Multi-angle {!capabilities.facefusion && '(unavailable)'}
+              </button>
+            </div>
+
+            {mainTab === 'standard' && (
           <form onSubmit={handleSubmit} style={styles.form}>
             <div style={styles.previewRow}>
               <div style={styles.uploadGroup}>
@@ -438,6 +523,75 @@ export default function App() {
               Start face swap
             </button>
           </form>
+            )}
+
+            {mainTab === 'multiangle' && (
+          <form onSubmit={handleSubmitMulti} style={styles.form}>
+            <p style={styles.optionDesc}>
+              Upload 1 photo (same as before) or 2–5 photos of the same face from different angles. Uses FaceFusion only: hyperswap_1a_256 with enhancement on.
+            </p>
+            <div style={styles.previewRow}>
+              <div style={styles.uploadGroup}>
+                <label style={styles.label}>Source face(s) — 1 or 2–5 photos</label>
+                <div style={styles.dropZone}>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={(e) => setMultiSources(e.target.files?.length ? Array.from(e.target.files) : [])}
+                    style={styles.hiddenInput}
+                  />
+                  {multiSources.length > 0 ? (
+                    <span style={styles.placeholder}>{multiSources.length} image{multiSources.length !== 1 ? 's' : ''} selected</span>
+                  ) : (
+                    <span style={styles.placeholder}>+ Add 1 or more photos</span>
+                  )}
+                </div>
+                {multiSources.length > 0 && (
+                  <span style={styles.fileName}>
+                    {multiSources.length > 5 ? 'Max 5 images' : 'OK'}
+                  </span>
+                )}
+              </div>
+              <div style={styles.uploadGroup}>
+                <label style={styles.label}>Target video</label>
+                <div style={styles.dropZone}>
+                  <input
+                    type="file"
+                    accept="video/*"
+                    onChange={(e) => setMultiTarget(e.target.files?.[0] || null)}
+                    style={styles.hiddenInput}
+                  />
+                  {multiTargetPreview ? (
+                    <video
+                      src={multiTargetPreview}
+                      style={styles.previewVideo}
+                      muted
+                      loop
+                      playsInline
+                      onLoadedMetadata={(ev) => ev.target.play().catch(() => {})}
+                    />
+                  ) : (
+                    <span style={styles.placeholder}>+ Add video</span>
+                  )}
+                </div>
+                {multiTarget && <span style={styles.fileName}>{multiTarget.name}</span>}
+              </div>
+            </div>
+            <p style={{ ...styles.optionDesc, marginTop: 8 }}>
+              Engine: FaceFusion · model: hyperswap_1a_256 · pixel: 256 · enhancement: on
+            </p>
+            {error && <p style={styles.error}>{error}</p>}
+            <button
+              type="submit"
+              style={styles.button}
+              disabled={multiSources.length < 1 || multiSources.length > 5 || !multiTarget}
+            >
+              Start face swap
+            </button>
+          </form>
+            )}
+          </>
         ) : (
           <div style={styles.statusCard}>
             <h2 style={styles.statusTitle}>
@@ -446,12 +600,16 @@ export default function App() {
               {(status?.status === 'pending' || status?.status === 'processing') &&
                 (status?.stage === 'extracting'
                   ? 'Extracting frames...'
+                  : status?.stage === 'swapping' && status?.settings?.engine === 'facefusion'
+                  ? 'Running FaceFusion...'
                   : status?.stage === 'swapping'
                   ? `Swapping faces (${status?.processed_frames || 0}/${status?.total_frames || 0})`
                   : status?.stage === 'interpolating'
                   ? 'Motion smoothing...'
                   : status?.stage === 'merging'
                   ? 'Merging video...'
+                  : status?.stage === 'cloth'
+                  ? 'Applying cloth color...'
                   : 'Processing...')}
             </h2>
 
@@ -499,15 +657,18 @@ export default function App() {
 
             {status?.error && <p style={styles.error}>{status.error}</p>}
 
+            {(status?.status === 'processing' || status?.status === 'pending' || status?.status === 'completed') && status?.settings && (
+              <p style={styles.settingsUsed}>
+                {status.settings.multi_angle
+                  ? `Multi-angle · engine=FaceFusion · model=${status.settings.facefusion_model || 'hyperswap_1a_256'} · pixel=${status.settings.facefusion_pixel_boost || '256'} · enhance on`
+                  : status.settings.engine === 'facefusion'
+                  ? `Settings: engine=FaceFusion · model=${status.settings.facefusion_model || 'inswapper_128_fp16'} · pixel=${status.settings.facefusion_pixel_boost || '128'} · enhance ${status.settings.facefusion_face_enhancer ? 'on' : 'off'} · lip sync ${status.settings.facefusion_lip_sync ? 'on' : 'off'}`
+                  : `Settings: engine=Classic · ${status.settings.swap_model} · det ${status.settings.det_size} · ${status.settings.upscale}× upscale · ${status.settings.interpolate}× smoother · enhance ${status.settings.enhance ? 'on' : 'off'} · hair ${status.settings.hair_match ? 'on' : 'off'}`}
+              </p>
+            )}
+
             {status?.status === 'completed' && (
               <>
-                {status?.settings && (
-                  <p style={styles.settingsUsed}>
-                    {status.settings.engine === 'facefusion'
-                      ? `Settings: engine=FaceFusion · model=${status.settings.facefusion_model || 'inswapper_128_fp16'} · pixel=${status.settings.facefusion_pixel_boost || '128'} · enhance ${status.settings.facefusion_face_enhancer ? 'on' : 'off'} · lip sync ${status.settings.facefusion_lip_sync ? 'on' : 'off'}`
-                      : `Settings: engine=Classic · ${status.settings.swap_model} · det ${status.settings.det_size} · ${status.settings.upscale}× upscale · ${status.settings.interpolate}× smoother · enhance ${status.settings.enhance ? 'on' : 'off'} · hair ${status.settings.hair_match ? 'on' : 'off'}`}
-                  </p>
-                )}
                 <div style={styles.resultPreview}>
                   <video
                     src={`${API_BASE}/result/${jobId}`}
@@ -581,11 +742,13 @@ const styles = {
     gridTemplateColumns: '1fr 1fr',
     gap: '1rem',
     marginBottom: '1.25rem',
+    minWidth: 0,
   },
   uploadGroup: {
     display: 'flex',
     flexDirection: 'column',
     gap: '0.35rem',
+    minWidth: 0,
   },
   label: {
     fontSize: '0.9rem',
@@ -594,6 +757,9 @@ const styles = {
   dropZone: {
     position: 'relative',
     aspectRatio: '1',
+    minHeight: 0,
+    minWidth: 0,
+    maxWidth: '100%',
     background: 'var(--bg)',
     border: '2px dashed var(--border)',
     borderRadius: 8,
@@ -609,13 +775,19 @@ const styles = {
     opacity: 0,
     cursor: 'pointer',
     width: '100%',
+    height: '100%',
   },
   previewImg: {
+    position: 'absolute',
+    inset: 0,
     width: '100%',
     height: '100%',
     objectFit: 'cover',
   },
   previewVideo: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
     width: '100%',
     height: '100%',
     objectFit: 'cover',
@@ -627,6 +799,27 @@ const styles = {
   fileName: {
     fontSize: '0.8rem',
     color: 'var(--accent)',
+  },
+  mainTabs: {
+    display: 'flex',
+    gap: 0,
+    marginBottom: '1.25rem',
+    border: '1px solid var(--border)',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  mainTab: {
+    flex: 1,
+    padding: '0.75rem 1rem',
+    background: 'var(--bg)',
+    border: 'none',
+    cursor: 'pointer',
+    fontSize: '1rem',
+    color: 'var(--text-muted)',
+  },
+  mainTabActive: {
+    background: 'var(--accent)',
+    color: 'var(--bg)',
   },
   engineTabs: {
     display: 'flex',

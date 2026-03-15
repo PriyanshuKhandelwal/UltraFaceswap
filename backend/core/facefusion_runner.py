@@ -5,7 +5,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 
 def _get_facefusion_path() -> Optional[str]:
@@ -105,13 +105,14 @@ def run_facefusion(
     face_enhancer_blend: float = 0.5,
     lip_sync: bool = False,
     source_audio_path: Optional[str] = None,
+    source_paths: Optional[List[str]] = None,
     timeout: Optional[int] = 3600,
 ) -> None:
     """
     Run FaceFusion headless for face swap.
 
     Args:
-        source_path: Path to source face image
+        source_path: Path to source face image (used when source_paths is None)
         target_path: Path to target video
         output_path: Path for output video
         face_swapper_model: FaceFusion model (inswapper_128_fp16, simswap_256, etc.)
@@ -120,6 +121,7 @@ def run_facefusion(
         lip_sync: Enable lip sync
         source_audio_path: Audio file for lip sync; if None and lip_sync=True, audio is
             extracted from target video via ffmpeg
+        source_paths: Optional list of source image paths (multi-angle); if set, used instead of source_path
         timeout: Subprocess timeout in seconds (default 1 hour)
 
     Raises:
@@ -136,10 +138,18 @@ def run_facefusion(
             f"FaceFusion script not found in {root}. Expected facefusion.py or run.py."
         )
 
-    source_path = os.path.abspath(source_path)
     target_path = os.path.abspath(target_path)
     output_path = os.path.abspath(output_path)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    # Build source list: multi-angle images or single source_path
+    if source_paths:
+        image_paths = [os.path.abspath(p) for p in source_paths if p and os.path.isfile(p)]
+        if not image_paths:
+            raise RuntimeError("No valid source image paths in source_paths.")
+    else:
+        source_path = os.path.abspath(source_path)
+        image_paths = [source_path]
 
     processors = ["face_swapper"]
     if face_enhancer_blend > 0:
@@ -147,8 +157,8 @@ def run_facefusion(
     if lip_sync:
         processors.append("lip_syncer")
 
-    # Lip sync needs source audio: pass image + audio via -s
-    source_paths: list[str] = [source_path]
+    # Lip sync needs source audio: pass images + audio via -s
+    source_paths_final: list[str] = list(image_paths)
     extracted_audio: Optional[str] = None
     if lip_sync:
         audio_path = source_audio_path
@@ -180,7 +190,7 @@ def run_facefusion(
                     "Lip sync requires ffmpeg to extract audio from the target video. Install ffmpeg and try again."
                 )
         if audio_path:
-            source_paths.append(os.path.abspath(audio_path))
+            source_paths_final.append(os.path.abspath(audio_path))
 
     jobs_dir = os.path.join(root, ".jobs")
     os.makedirs(jobs_dir, exist_ok=True)
@@ -192,7 +202,7 @@ def run_facefusion(
         "headless-run",
         "--jobs-path", jobs_dir,
         "--processors", *processors,
-        "-s", *source_paths,
+        "-s", *source_paths_final,
         "-t", target_path,
         "-o", output_path,
     ]
