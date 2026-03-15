@@ -34,6 +34,7 @@ from backend.core.upscaler import upscale_image
 from backend.core.interpolator import interpolate_frames
 from backend.core.merger import merge_frames_to_video, get_video_fps as _get_fps
 from backend.core.hair import apply_hair_color_matching
+from backend.core.cloth import apply_cloth_color_change, apply_cloth_color_change_to_video, parse_color_hex
 from backend.core.facefusion_runner import run_facefusion, is_facefusion_available
 
 
@@ -74,6 +75,8 @@ def run_swap(
     upscale: int = 1,
     interpolate: int = 1,
     hair_match: bool = True,
+    cloth_color: Optional[str] = None,
+    cloth_strength: float = 0.6,
     temp_dir: Optional[str] = None,
 ):
     """
@@ -118,6 +121,13 @@ def run_swap(
             continue
 
         try:
+            # Cloth color change on original frame first (before face swap)
+            if cloth_color and parse_color_hex(cloth_color) is not None:
+                target_bbox = swapper.get_primary_face_bbox(frame_bgr)
+                if target_bbox is not None:
+                    frame_bgr = apply_cloth_color_change(
+                        frame_bgr, target_bbox, cloth_color, strength=cloth_strength
+                    )
             result = swapper.process_frame(source_bgr, frame_bgr)
             if hair_match and source_bbox is not None:
                 target_bbox = swapper.get_primary_face_bbox(result)
@@ -220,6 +230,18 @@ def main():
         help="Disable hair color matching",
     )
     parser.add_argument(
+        "--cloth-color",
+        metavar="HEX",
+        help="Recolor clothing/torso to hex color (e.g. #ff0000 or ff0000); classic engine only",
+    )
+    parser.add_argument(
+        "--cloth-strength",
+        type=float,
+        default=0.6,
+        metavar="0-1",
+        help="Cloth color blend strength (default: 0.6)",
+    )
+    parser.add_argument(
         "--temp-dir",
         help="Directory for temporary frames (default: system temp)",
     )
@@ -290,9 +312,10 @@ def main():
             out_dir = Path(args.output_dir or "facefusion_output")
             out_dir.mkdir(parents=True, exist_ok=True)
             lip_opts = [False, True] if getattr(args, "facefusion_lip", False) else [False]
+            # hyperswap models: 256,512,768,1024 only (no 128)
             grid = list(itertools.product(
-                ["inswapper_128_fp16", "inswapper_128", "simswap_256", "hyperswap_1a_256", "blendswap_256"],
-                ["128", "256", "512"],
+                ["hyperswap_1a_256", "hyperswap_1b_256", "hyperswap_1c_256"],
+                ["256", "512", "768"],
                 [False, True],
                 lip_opts,
             ))
@@ -320,10 +343,33 @@ def main():
                     print(f"  Failed: {e}")
             print(f"\nDone. Outputs in {out_dir.absolute()}" + (f" ({failed} failed)" if failed else ""))
         else:
+            target_video = args.target
+            cloth_color = getattr(args, "cloth_color", None)
+            cloth_strength = getattr(args, "cloth_strength", 0.6)
+            if cloth_color and parse_color_hex(cloth_color) is not None:
+                import tempfile
+                print("Applying cloth color change to target video (before face swap)...")
+                fd, temp_video = tempfile.mkstemp(suffix=".mp4")
+                os.close(fd)
+                try:
+                    apply_cloth_color_change_to_video(
+                        args.target,
+                        temp_video,
+                        cloth_color,
+                        strength=cloth_strength,
+                    )
+                    target_video = temp_video
+                except Exception as e:
+                    if os.path.isfile(temp_video):
+                        try:
+                            os.unlink(temp_video)
+                        except OSError:
+                            pass
+                    raise e
             print("Running FaceFusion...")
             run_facefusion(
                 args.source,
-                args.target,
+                target_video,
                 args.output,
                 face_swapper_model=args.facefusion_model,
                 face_swapper_pixel_boost=args.facefusion_pixel_boost,
@@ -331,6 +377,11 @@ def main():
                 lip_sync=args.facefusion_lip_sync,
                 source_audio_path=getattr(args, "source_audio", None),
             )
+            if target_video != args.target and os.path.isfile(target_video):
+                try:
+                    os.unlink(target_video)
+                except OSError:
+                    pass
             print(f"Done. Output saved to {args.output}")
             print(f"Settings: engine=facefusion · model={args.facefusion_model} · pixel={args.facefusion_pixel_boost}")
         return
@@ -376,6 +427,8 @@ def main():
         upscale=args.upscale,
         interpolate=args.interpolate,
         hair_match=not args.no_hair_match,
+        cloth_color=getattr(args, "cloth_color", None),
+        cloth_strength=getattr(args, "cloth_strength", 0.6),
         temp_dir=args.temp_dir,
     )
 

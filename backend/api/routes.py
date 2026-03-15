@@ -19,6 +19,7 @@ from backend.core.interpolator import interpolate_frames
 from backend.core.merger import merge_frames_to_video, get_video_fps
 from backend.core.analyzer import suggest_settings
 from backend.core.hair import apply_hair_color_matching
+from backend.core.cloth import apply_cloth_color_change, apply_cloth_color_change_to_video, parse_color_hex
 from backend.core.facefusion_runner import run_facefusion, is_facefusion_available
 import cv2
 
@@ -62,8 +63,10 @@ def _run_facefusion_task(
     facefusion_pixel_boost: str = "128",
     facefusion_face_enhancer: bool = False,
     facefusion_lip_sync: bool = False,
+    cloth_color: Optional[str] = None,
+    cloth_strength: float = 0.6,
 ) -> None:
-    """Run FaceFusion subprocess for face swap."""
+    """Run FaceFusion subprocess for face swap. Cloth change is applied to target video first if cloth_color set."""
     if not is_facefusion_available():
         job_store.update(job_id, status=JobStatus.FAILED, error="FaceFusion not configured. Set ULTRAFACESWAP_FACEFUSION_PATH.")
         for p in [source_path, target_path]:
@@ -77,11 +80,24 @@ def _run_facefusion_task(
     job_store.update(job_id, status=JobStatus.PROCESSING, stage="swapping")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_path = os.path.join(OUTPUT_DIR, f"{job_id}.mp4")
+    cloth_video_path: Optional[str] = None
+    video_to_swap = target_path
 
     try:
+        if cloth_color and parse_color_hex(cloth_color) is not None:
+            job_store.update(job_id, stage="cloth")
+            fd, cloth_video_path = tempfile.mkstemp(suffix=".mp4")
+            os.close(fd)
+            apply_cloth_color_change_to_video(
+                target_path,
+                cloth_video_path,
+                cloth_color,
+                strength=cloth_strength,
+            )
+            video_to_swap = cloth_video_path
         run_facefusion(
             source_path,
-            target_path,
+            video_to_swap,
             output_path,
             face_swapper_model=facefusion_model,
             face_swapper_pixel_boost=facefusion_pixel_boost,
@@ -106,7 +122,7 @@ def _run_facefusion_task(
     except Exception as e:
         job_store.update(job_id, status=JobStatus.FAILED, error=str(e))
     finally:
-        for p in [source_path, target_path]:
+        for p in [source_path, target_path, cloth_video_path]:
             if p and os.path.exists(p):
                 try:
                     os.remove(p)
@@ -125,6 +141,8 @@ def run_swap_task(
     upscale: int = 1,
     interpolate: int = 1,
     hair_match: bool = True,
+    cloth_color: Optional[str] = None,
+    cloth_strength: float = 0.6,
     facefusion_model: str = "inswapper_128_fp16",
     facefusion_pixel_boost: str = "128",
     facefusion_face_enhancer: bool = False,
@@ -139,6 +157,8 @@ def run_swap_task(
                 facefusion_pixel_boost=facefusion_pixel_boost,
                 facefusion_face_enhancer=facefusion_face_enhancer,
                 facefusion_lip_sync=facefusion_lip_sync,
+                cloth_color=cloth_color,
+                cloth_strength=cloth_strength,
             )
             return
 
@@ -166,6 +186,13 @@ def run_swap_task(
             if frame_bgr is None:
                 continue
             try:
+                # Cloth color change on original frame first (before face swap)
+                if cloth_color and parse_color_hex(cloth_color) is not None:
+                    target_bbox = swapper.get_primary_face_bbox(frame_bgr)
+                    if target_bbox is not None:
+                        frame_bgr = apply_cloth_color_change(
+                            frame_bgr, target_bbox, cloth_color, strength=cloth_strength
+                        )
                 result = swapper.process_frame(source_bgr, frame_bgr)
                 if hair_match and source_bbox is not None:
                     target_bbox = swapper.get_primary_face_bbox(result)
@@ -288,6 +315,8 @@ async def create_swap_job(
     facefusion_pixel_boost: str = Form("128"),
     facefusion_face_enhancer: bool = Form(False),
     facefusion_lip_sync: bool = Form(False),
+    cloth_color: Optional[str] = Form(None),
+    cloth_strength: float = Form(0.6),
 ) -> dict:
     """
     Upload source photo and target video, start face swap job.
@@ -334,6 +363,8 @@ async def create_swap_job(
             "facefusion_pixel_boost": facefusion_pixel_boost,
             "facefusion_face_enhancer": facefusion_face_enhancer,
             "facefusion_lip_sync": facefusion_lip_sync,
+            "cloth_color": cloth_color,
+            "cloth_strength": cloth_strength,
         },
     )
     thread.start()
