@@ -77,6 +77,8 @@ For higher-quality results, you can use [FaceFusion](https://github.com/facefusi
    ```
 5. In the web app, select the "FaceFusion" tab when available.
 
+**Memory:** FaceFusion with high pixel boost (512/768), face enhancer, and long videos can use a lot of RAM. If the process is killed with exit code -9 (SIGKILL), the system likely ran out of memory. Use a lower pixel boost (256), disable face enhancer, or try a shorter clip.
+
 FaceFusion is optional; the Classic engine works out of the box.
 
 ## Pipeline (Classic)

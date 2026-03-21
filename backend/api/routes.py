@@ -4,7 +4,6 @@ import os
 import shutil
 import tempfile
 import threading
-import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -18,24 +17,72 @@ from backend.core.enhancer import enhance_face
 from backend.core.upscaler import upscale_image
 from backend.core.interpolator import interpolate_frames
 from backend.core.merger import merge_frames_to_video, get_video_fps
-from backend.core.analyzer import suggest_settings
+from backend.core.analyzer import suggest_settings, get_video_metadata
 from backend.core.hair import apply_hair_color_matching
 from backend.core.cloth import apply_cloth_color_change, apply_cloth_color_change_to_video, parse_color_hex
-from backend.core.facefusion_runner import run_facefusion, is_facefusion_available
+from backend.core.facefusion_runner import (
+    run_facefusion,
+    run_facefusion_two_pass,
+    is_facefusion_available,
+    check_output_has_swapped_faces,
+)
+from backend.core.frame_validator import validate_and_repair
 import cv2
 
 router = APIRouter(prefix="/api", tags=["face-swap"])
 
-# Output directory for completed jobs
 OUTPUT_DIR = os.environ.get("ULTRAFACESWAP_OUTPUT", "/tmp/ultrafaceswap_output")
+
+# ---------------------------------------------------------------------------
+# Preset definitions — the single source of truth for Quick / Best / Max
+# ---------------------------------------------------------------------------
+PRESETS = {
+    "quick": {
+        "face_swapper_model": "hyperswap_1a_256",
+        "pixel_boost": "256",
+        "face_enhancer": False,
+        "face_enhancer_blend": 0.0,
+        "face_detector_model": "retinaface",
+        "face_detector_score": 0.35,
+        "face_selector_mode": "reference",
+        "face_mask_blur": 0.3,
+        "two_pass": False,
+        "label": "Quick",
+    },
+    "best": {
+        "face_swapper_model": "hyperswap_1a_256",
+        "pixel_boost": "256",
+        "face_enhancer": True,
+        "face_enhancer_blend": 0.5,
+        "face_detector_model": "retinaface",
+        "face_detector_score": 0.35,
+        "face_selector_mode": "reference",
+        "face_mask_blur": 0.3,
+        "two_pass": True,
+        "label": "Best",
+    },
+    "max": {
+        "face_swapper_model": "hyperswap_1a_256",
+        "pixel_boost": "512",
+        "face_enhancer": True,
+        "face_enhancer_blend": 0.5,
+        "face_detector_model": "retinaface",
+        "face_detector_score": 0.3,
+        "face_selector_mode": "reference",
+        "face_mask_blur": 0.35,
+        "two_pass": True,
+        "label": "Max",
+    },
+}
 
 
 @router.get("/capabilities")
 async def get_capabilities() -> dict:
-    """Return available engines. FaceFusion requires separate install + FACEFUSION_PATH."""
+    """Return available engines and preset list."""
     return {
         "classic": True,
         "facefusion": is_facefusion_available(),
+        "presets": {k: v["label"] for k, v in PRESETS.items()},
     }
 
 
@@ -50,32 +97,40 @@ def _settings_suffix(
     facefusion_model: str = "",
     facefusion_pixel_boost: str = "",
 ) -> str:
-    """Short settings string for filenames: model_d640_u1_i1_enh0_hair1 or facefusion_inswapper128_p128"""
     if engine == "facefusion":
         return f"facefusion_{facefusion_model}_p{facefusion_pixel_boost}"
     return f"{swap_model}_d{det_size}_u{upscale}_i{interpolate}_enh{1 if enhance else 0}_hair{1 if hair_match else 0}"
 
 
+# ---------------------------------------------------------------------------
+# Core FaceFusion task — used by preset, pro, and multi-angle routes
+# ---------------------------------------------------------------------------
+
 def _run_facefusion_task(
     job_id: str,
     source_path: str,
     target_path: str,
-    facefusion_model: str = "inswapper_128_fp16",
-    facefusion_pixel_boost: str = "128",
-    facefusion_face_enhancer: bool = False,
+    facefusion_model: str = "hyperswap_1a_256",
+    facefusion_pixel_boost: str = "256",
+    facefusion_face_enhancer: bool = True,
+    facefusion_face_enhancer_blend: Optional[float] = None,
     facefusion_lip_sync: bool = False,
     cloth_color: Optional[str] = None,
     cloth_strength: float = 0.6,
+    face_detector_model: Optional[str] = "retinaface",
+    face_detector_size: Optional[str] = None,
+    face_detector_score: Optional[float] = 0.35,
+    face_selector_mode: Optional[str] = "reference",
+    face_mask_blur: Optional[float] = 0.3,
+    pro_mode: bool = False,
+    preset: Optional[str] = None,
+    two_pass: bool = True,
+    source_paths: Optional[List[str]] = None,
 ) -> None:
-    """Run FaceFusion subprocess for face swap. Cloth change is applied to target video first if cloth_color set."""
+    """Run FaceFusion subprocess for face swap with two-pass support and OOM fallback."""
     if not is_facefusion_available():
         job_store.update(job_id, status=JobStatus.FAILED, error="FaceFusion not configured. Set ULTRAFACESWAP_FACEFUSION_PATH.")
-        for p in [source_path, target_path]:
-            if p and os.path.exists(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
+        _cleanup_paths([source_path, target_path])
         return
 
     settings = {
@@ -85,6 +140,21 @@ def _run_facefusion_task(
         "facefusion_face_enhancer": facefusion_face_enhancer,
         "facefusion_lip_sync": facefusion_lip_sync,
     }
+    if preset:
+        settings["preset"] = preset
+    if pro_mode:
+        settings["pro_mode"] = True
+    if source_paths and len(source_paths) > 1:
+        settings["multi_angle"] = True
+    if face_detector_model:
+        settings["face_detector_model"] = face_detector_model
+    if face_detector_size:
+        settings["face_detector_size"] = face_detector_size
+    if face_mask_blur is not None:
+        settings["face_mask_blur"] = face_mask_blur
+    if two_pass and facefusion_face_enhancer:
+        settings["two_pass"] = True
+
     job_store.update(
         job_id,
         status=JobStatus.PROCESSING,
@@ -103,58 +173,349 @@ def _run_facefusion_task(
             fd, cloth_video_path = tempfile.mkstemp(suffix=".mp4")
             os.close(fd)
             apply_cloth_color_change_to_video(
-                target_path,
-                cloth_video_path,
-                cloth_color,
-                strength=cloth_strength,
+                target_path, cloth_video_path, cloth_color, strength=cloth_strength,
             )
             video_to_swap = cloth_video_path
-        job_store.update(job_id, progress=50, stage="swapping")
 
-        stop_progress = threading.Event()
+        video_meta = get_video_metadata(video_to_swap)
+        total_frames = video_meta.get("frame_count") or 0
+        if total_frames > 0:
+            job_store.update(job_id, total_frames=total_frames, stage="swapping")
 
-        def _facefusion_progress_loop() -> None:
-            """Gradually bump progress 50 -> 90 while FaceFusion runs (no real progress from subprocess)."""
-            while not stop_progress.wait(timeout=8):
-                job = job_store.get(job_id)
-                if not job or job.status != JobStatus.PROCESSING or job.progress >= 90:
-                    break
-                job_store.update(job_id, progress=min(90, job.progress + 6))
+        enhancer_blend = 0.0
+        if facefusion_face_enhancer:
+            if facefusion_face_enhancer_blend is not None and 0 <= facefusion_face_enhancer_blend <= 1:
+                enhancer_blend = facefusion_face_enhancer_blend
+            else:
+                enhancer_blend = 0.5
 
-        progress_thread = threading.Thread(target=_facefusion_progress_loop, daemon=True)
-        progress_thread.start()
-        try:
-            run_facefusion(
-                source_path,
-                video_to_swap,
-                output_path,
-                face_swapper_model=facefusion_model,
-                face_swapper_pixel_boost=facefusion_pixel_boost,
-                face_enhancer_blend=0.5 if facefusion_face_enhancer else 0.0,
-                lip_sync=facefusion_lip_sync,
+        is_two_pass = two_pass and enhancer_blend > 0
+        current_pass = [0]
+
+        def _on_progress(processed: int, total: int) -> None:
+            if is_two_pass:
+                base = 10 if current_pass[0] == 0 else 50
+                span = 35 if current_pass[0] == 0 else 35
+            else:
+                base = 10
+                span = 75
+            pct = base + int(span * processed / total) if total > 0 else base
+            job_store.update(
+                job_id,
+                processed_frames=processed,
+                total_frames=total if total > 0 else total_frames,
+                progress=min(pct, 88),
             )
-        finally:
-            stop_progress.set()
-            progress_thread.join(timeout=1)
 
-        job_store.update(
-            job_id,
-            status=JobStatus.COMPLETED,
-            progress=100,
-            stage="done",
-            result_path=output_path,
-            settings=settings,
-        )
-    except Exception as e:
-        job_store.update(job_id, status=JobStatus.FAILED, error=str(e))
-    finally:
-        for p in [source_path, target_path, cloth_video_path]:
-            if p and os.path.exists(p):
+        def _on_pass_started(pass_num: int) -> None:
+            current_pass[0] = pass_num
+            if pass_num == 0:
+                job_store.update(job_id, progress=10, stage="swapping", processed_frames=0)
+            else:
+                job_store.update(job_id, progress=55, stage="enhancing", processed_frames=0)
+
+        job_store.update(job_id, progress=10, stage="swapping")
+
+        try:
+            if is_two_pass:
+                result_info = run_facefusion_two_pass(
+                    source_path,
+                    video_to_swap,
+                    output_path,
+                    face_swapper_model=facefusion_model,
+                    face_swapper_pixel_boost=facefusion_pixel_boost,
+                    face_enhancer_blend=enhancer_blend,
+                    lip_sync=facefusion_lip_sync,
+                    source_paths=source_paths,
+                    face_detector_model=face_detector_model,
+                    face_detector_size=face_detector_size,
+                    face_detector_score=face_detector_score,
+                    face_selector_mode=face_selector_mode,
+                    face_mask_blur=face_mask_blur,
+                    progress_callback=_on_progress,
+                    pass_started_callback=_on_pass_started,
+                    auto_fallback=True,
+                )
+                warning = result_info.get("warning")
+                if warning:
+                    settings["warning"] = warning
+                    settings["facefusion_face_enhancer"] = False
+            else:
+                run_facefusion(
+                    source_path,
+                    video_to_swap,
+                    output_path,
+                    face_swapper_model=facefusion_model,
+                    face_swapper_pixel_boost=facefusion_pixel_boost,
+                    face_enhancer_blend=enhancer_blend,
+                    lip_sync=facefusion_lip_sync,
+                    source_paths=source_paths,
+                    face_detector_model=face_detector_model,
+                    face_detector_size=face_detector_size,
+                    face_detector_score=face_detector_score,
+                    face_selector_mode=face_selector_mode,
+                    face_mask_blur=face_mask_blur,
+                    progress_callback=_on_progress,
+                )
+
+            if os.path.isfile(output_path) and not check_output_has_swapped_faces(video_to_swap, output_path):
+                settings["no_face_warning"] = True
+                settings["warning"] = (
+                    "No faces appear to have been swapped. The output looks identical to the input. "
+                    "This usually means FaceFusion couldn't detect a face in the source photo or target video. "
+                    "Try a clearer, front-facing source photo."
+                )
+
+            # --- Frame consistency validation & repair ---
+            if os.path.isfile(output_path) and not settings.get("no_face_warning"):
+                job_store.update(job_id, stage="validating", progress=89)
+
+                def _on_validate_progress(stage: str, current: int, vtotal: int) -> None:
+                    if stage == "validating":
+                        pct = 89 + int(6 * current / vtotal) if vtotal > 0 else 89
+                    else:
+                        pct = 95 + int(4 * current / vtotal) if vtotal > 0 else 95
+                    job_store.update(job_id, stage=stage, progress=min(pct, 99))
+
                 try:
-                    os.remove(p)
-                except OSError:
-                    pass
+                    repair_result = validate_and_repair(
+                        source_path,
+                        output_path,
+                        source_paths=source_paths,
+                        progress_callback=_on_validate_progress,
+                    )
+                    settings["validation"] = repair_result
+                    if repair_result.get("repaired_frames", 0) > 0 or repair_result.get("failed_frames", 0) > 0:
+                        settings["repair_details"] = repair_result.get("repair_details", "")
+                except Exception as val_err:
+                    settings["validation_error"] = str(val_err)
 
+            job_store.update(
+                job_id,
+                status=JobStatus.COMPLETED,
+                progress=100,
+                stage="done",
+                result_path=output_path,
+                settings=settings,
+            )
+        except Exception as e:
+            job_store.update(job_id, status=JobStatus.FAILED, error=str(e))
+    finally:
+        paths_to_clean = [source_path, target_path, cloth_video_path]
+        if source_paths:
+            paths_to_clean.extend(source_paths)
+        _cleanup_paths(paths_to_clean)
+
+
+def _cleanup_paths(paths: list) -> None:
+    for p in paths:
+        if p and os.path.exists(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Preset-based endpoint (new simplified API)
+# ---------------------------------------------------------------------------
+
+@router.post("/swap-preset")
+async def create_swap_preset_job(
+    source: UploadFile = File(...),
+    target: UploadFile = File(...),
+    preset: str = Form("best"),
+    lip_sync: bool = Form(False),
+) -> dict:
+    """
+    Simple preset-based face swap. Presets: quick, best, max.
+    Uses hyperswap_1a_256 + retinaface with two-pass enhance for best/max.
+    """
+    if not is_facefusion_available():
+        raise HTTPException(400, "FaceFusion not available. Install FaceFusion and set ULTRAFACESWAP_FACEFUSION_PATH.")
+    if not source.content_type or not source.content_type.startswith("image/"):
+        raise HTTPException(400, "Source must be an image (jpg, png)")
+    if not target.content_type or "video" not in target.content_type:
+        raise HTTPException(400, "Target must be a video (mp4, webm)")
+    if preset not in PRESETS:
+        preset = "best"
+
+    cfg = PRESETS[preset]
+    job = job_store.create()
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(source.filename or "img").suffix) as s:
+        shutil.copyfileobj(source.file, s)
+        source_path = s.name
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as t:
+        shutil.copyfileobj(target.file, t)
+        target_path = t.name
+
+    thread = threading.Thread(
+        target=_run_facefusion_task,
+        args=(job.id, source_path, target_path),
+        kwargs={
+            "facefusion_model": cfg["face_swapper_model"],
+            "facefusion_pixel_boost": cfg["pixel_boost"],
+            "facefusion_face_enhancer": cfg["face_enhancer"],
+            "facefusion_face_enhancer_blend": cfg["face_enhancer_blend"],
+            "facefusion_lip_sync": lip_sync,
+            "face_detector_model": cfg["face_detector_model"],
+            "face_detector_score": cfg.get("face_detector_score", 0.35),
+            "face_selector_mode": cfg.get("face_selector_mode", "reference"),
+            "face_mask_blur": cfg["face_mask_blur"],
+            "two_pass": cfg["two_pass"],
+            "preset": preset,
+        },
+    )
+    thread.start()
+
+    return {
+        "job_id": job.id,
+        "status": job.status.value,
+        "preset": preset,
+        "message": f"{cfg['label']} job started. Poll /api/status/{job.id} for progress.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Multi-angle endpoint (now uses two-pass + retinaface by default)
+# ---------------------------------------------------------------------------
+
+@router.post("/swap-multi")
+async def create_swap_multi_job(
+    sources: List[UploadFile] = File(...),
+    target: UploadFile = File(...),
+    face_enhancer: bool = Form(True),
+) -> dict:
+    """
+    Multi-angle face swap: upload 1-5 source photos and target video.
+    Uses hyperswap_1a_256 + retinaface. Two-pass enhance by default.
+    """
+    if not is_facefusion_available():
+        raise HTTPException(400, "FaceFusion not available. Install FaceFusion and set ULTRAFACESWAP_FACEFUSION_PATH.")
+    if len(sources) < 1 or len(sources) > 5:
+        raise HTTPException(400, "Upload between 1 and 5 source images.")
+    for f in sources:
+        if not f.content_type or not f.content_type.startswith("image/"):
+            raise HTTPException(400, "All sources must be images (jpg, png).")
+    if not target.content_type or "video" not in target.content_type:
+        raise HTTPException(400, "Target must be a video (mp4, webm).")
+
+    job = job_store.create()
+    source_paths: List[str] = []
+    try:
+        for i, src in enumerate(sources):
+            ext = Path(src.filename or "img").suffix or ".png"
+            fd, path = tempfile.mkstemp(suffix=ext)
+            os.close(fd)
+            with open(path, "wb") as out:
+                shutil.copyfileobj(src.file, out)
+            source_paths.append(path)
+        fd, target_path = tempfile.mkstemp(suffix=".mp4")
+        os.close(fd)
+        with open(target_path, "wb") as out:
+            shutil.copyfileobj(target.file, out)
+    except Exception as e:
+        _cleanup_paths(source_paths)
+        raise HTTPException(500, str(e))
+
+    thread = threading.Thread(
+        target=_run_facefusion_task,
+        args=(job.id, source_paths[0], target_path),
+        kwargs={
+            "facefusion_model": "hyperswap_1a_256",
+            "facefusion_pixel_boost": "256",
+            "facefusion_face_enhancer": face_enhancer,
+            "facefusion_face_enhancer_blend": 0.5 if face_enhancer else 0.0,
+            "face_detector_model": "retinaface",
+            "face_detector_score": 0.35,
+            "face_selector_mode": "reference",
+            "face_mask_blur": 0.3,
+            "two_pass": face_enhancer,
+            "source_paths": source_paths,
+        },
+    )
+    thread.start()
+
+    return {
+        "job_id": job.id,
+        "status": job.status.value,
+        "message": "Multi-angle job started. Poll /api/status/{job.id} for progress.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pro endpoint (advanced users — kept for backward compat / power users)
+# ---------------------------------------------------------------------------
+
+@router.post("/swap-pro")
+async def create_swap_pro_job(
+    source: UploadFile = File(...),
+    target: UploadFile = File(...),
+    facefusion_model: str = Form("hyperswap_1a_256"),
+    facefusion_pixel_boost: str = Form("256"),
+    facefusion_face_enhancer: bool = Form(True),
+    facefusion_face_enhancer_blend: float = Form(0.5),
+    facefusion_lip_sync: bool = Form(False),
+    face_detector_model: Optional[str] = Form("retinaface"),
+    face_detector_size: Optional[str] = Form(None),
+    face_detector_score: Optional[float] = Form(0.35),
+    face_selector_mode: Optional[str] = Form("reference"),
+    face_mask_blur: Optional[float] = Form(0.3),
+    two_pass: bool = Form(True),
+    cloth_color: Optional[str] = Form(None),
+    cloth_strength: float = Form(0.6),
+) -> dict:
+    """Pro face swap with full FaceFusion options + two-pass support."""
+    if not is_facefusion_available():
+        raise HTTPException(400, "FaceFusion not available. Install FaceFusion and set ULTRAFACESWAP_FACEFUSION_PATH.")
+    if not source.content_type or not source.content_type.startswith("image/"):
+        raise HTTPException(400, "Source must be an image (jpg, png)")
+    if not target.content_type or "video" not in target.content_type:
+        raise HTTPException(400, "Target must be a video (mp4, webm)")
+
+    job = job_store.create()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(source.filename or "img").suffix) as s:
+        shutil.copyfileobj(source.file, s)
+        source_path = s.name
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as t:
+        shutil.copyfileobj(target.file, t)
+        target_path = t.name
+
+    blend = facefusion_face_enhancer_blend if facefusion_face_enhancer else 0.0
+
+    thread = threading.Thread(
+        target=_run_facefusion_task,
+        args=(job.id, source_path, target_path),
+        kwargs={
+            "facefusion_model": facefusion_model,
+            "facefusion_pixel_boost": facefusion_pixel_boost,
+            "facefusion_face_enhancer": facefusion_face_enhancer,
+            "facefusion_face_enhancer_blend": blend,
+            "facefusion_lip_sync": facefusion_lip_sync,
+            "cloth_color": cloth_color,
+            "cloth_strength": cloth_strength,
+            "face_detector_model": face_detector_model or "retinaface",
+            "face_detector_size": face_detector_size or None,
+            "face_detector_score": face_detector_score if face_detector_score is not None else 0.35,
+            "face_selector_mode": face_selector_mode or "reference",
+            "face_mask_blur": face_mask_blur,
+            "pro_mode": True,
+            "two_pass": two_pass and facefusion_face_enhancer,
+        },
+    )
+    thread.start()
+
+    return {
+        "job_id": job.id,
+        "status": job.status.value,
+        "message": "Pro job started. Poll /api/status/{job.id} for progress.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Legacy standard swap endpoint (classic + facefusion engine)
+# ---------------------------------------------------------------------------
 
 def run_swap_task(
     job_id: str,
@@ -174,7 +535,7 @@ def run_swap_task(
     facefusion_face_enhancer: bool = False,
     facefusion_lip_sync: bool = False,
 ) -> None:
-    """Run face swap in background thread."""
+    """Run face swap in background thread (legacy standard tab)."""
     try:
         if engine == "facefusion":
             _run_facefusion_task(
@@ -185,6 +546,7 @@ def run_swap_task(
                 facefusion_lip_sync=facefusion_lip_sync,
                 cloth_color=cloth_color,
                 cloth_strength=cloth_strength,
+                two_pass=False,
             )
             return
 
@@ -226,7 +588,6 @@ def run_swap_task(
             if frame_bgr is None:
                 continue
             try:
-                # Cloth color change on original frame first (before face swap)
                 if cloth_color and parse_color_hex(cloth_color) is not None:
                     target_bbox = swapper.get_primary_face_bbox(frame_bgr)
                     if target_bbox is not None:
@@ -249,7 +610,6 @@ def run_swap_task(
                 import traceback
                 print(f"[UltraFaceswap] Frame {frame_path.name} swap failed: {e}")
                 traceback.print_exc()
-                # Write original frame so pipeline continues; avoid silent failure
                 cv2.imwrite(str(frame_path), frame_bgr)
             progress = 5 + int(85 * (i + 1) / len(frame_files))
             job_store.update(job_id, progress=progress, processed_frames=i + 1)
@@ -291,13 +651,7 @@ def run_swap_task(
             status=JobStatus.FAILED,
             error=str(e),
         )
-        # Cleanup
-        for p in [source_path, target_path]:
-            if p and os.path.exists(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
+        _cleanup_paths([source_path, target_path])
 
 
 @router.post("/suggest")
@@ -321,152 +675,9 @@ async def suggest_settings_endpoint(
     try:
         result = suggest_settings(source_path, target_path)
     finally:
-        for p in (source_path, target_path):
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
+        _cleanup_paths([source_path, target_path])
 
     return result
-
-
-def _run_facefusion_multi_task(
-    job_id: str,
-    source_paths: List[str],
-    target_path: str,
-) -> None:
-    """Run FaceFusion with multiple source images (multi-angle). Fixed: hyperswap_1a_256, enhance on."""
-    if not is_facefusion_available():
-        job_store.update(job_id, status=JobStatus.FAILED, error="FaceFusion not configured.")
-        for p in source_paths + [target_path]:
-            if p and os.path.exists(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
-        return
-
-    settings = {
-        "engine": "facefusion",
-        "facefusion_model": "hyperswap_1a_256",
-        "facefusion_pixel_boost": "256",
-        "facefusion_face_enhancer": True,
-        "facefusion_lip_sync": False,
-        "multi_angle": True,
-    }
-    job_store.update(
-        job_id,
-        status=JobStatus.PROCESSING,
-        stage="swapping",
-        progress=10,
-        settings=settings,
-    )
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    output_path = os.path.join(OUTPUT_DIR, f"{job_id}.mp4")
-
-    stop_progress = threading.Event()
-
-    def _progress_loop() -> None:
-        while not stop_progress.wait(timeout=8):
-            job = job_store.get(job_id)
-            if not job or job.status != JobStatus.PROCESSING or job.progress >= 90:
-                break
-            job_store.update(job_id, progress=min(90, job.progress + 6))
-
-    progress_thread = threading.Thread(target=_progress_loop, daemon=True)
-    progress_thread.start()
-
-    try:
-        job_store.update(job_id, progress=50, stage="swapping")
-        run_facefusion(
-            source_paths[0],
-            target_path,
-            output_path,
-            face_swapper_model="hyperswap_1a_256",
-            face_swapper_pixel_boost="256",
-            face_enhancer_blend=0.5,
-            lip_sync=False,
-            source_paths=source_paths,
-        )
-    except Exception as e:
-        job_store.update(job_id, status=JobStatus.FAILED, error=str(e))
-    finally:
-        stop_progress.set()
-        progress_thread.join(timeout=1)
-
-    for p in source_paths + [target_path]:
-        if p and os.path.exists(p):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
-
-    job = job_store.get(job_id)
-    if job and job.status != JobStatus.FAILED:
-        job_store.update(
-            job_id,
-            status=JobStatus.COMPLETED,
-            progress=100,
-            stage="done",
-            result_path=output_path,
-            settings=settings,
-        )
-
-
-@router.post("/swap-multi")
-async def create_swap_multi_job(
-    sources: List[UploadFile] = File(...),
-    target: UploadFile = File(...),
-) -> dict:
-    """
-    Multi-angle face swap: upload 1–5 source photos (one or different angles) and target video.
-    Uses FaceFusion only with hyperswap_1a_256 and enhancement on.
-    """
-    if not is_facefusion_available():
-        raise HTTPException(400, "FaceFusion not available. Install FaceFusion and set ULTRAFACESWAP_FACEFUSION_PATH.")
-    if len(sources) < 1 or len(sources) > 5:
-        raise HTTPException(400, "Upload between 1 and 5 source images.")
-    for f in sources:
-        if not f.content_type or not f.content_type.startswith("image/"):
-            raise HTTPException(400, "All sources must be images (jpg, png).")
-    if not target.content_type or "video" not in target.content_type:
-        raise HTTPException(400, "Target must be a video (mp4, webm).")
-
-    job = job_store.create()
-    source_paths: List[str] = []
-    try:
-        for i, src in enumerate(sources):
-            ext = Path(src.filename or "img").suffix or ".png"
-            fd, path = tempfile.mkstemp(suffix=ext)
-            os.close(fd)
-            with open(path, "wb") as out:
-                shutil.copyfileobj(src.file, out)
-            source_paths.append(path)
-        fd, target_path = tempfile.mkstemp(suffix=".mp4")
-        os.close(fd)
-        with open(target_path, "wb") as out:
-            shutil.copyfileobj(target.file, out)
-    except Exception as e:
-        for p in source_paths:
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
-        raise HTTPException(500, str(e))
-
-    thread = threading.Thread(
-        target=_run_facefusion_multi_task,
-        args=(job.id, source_paths, target_path),
-    )
-    thread.start()
-
-    return {
-        "job_id": job.id,
-        "status": job.status.value,
-        "message": "Multi-angle job started. Poll /api/status/{job_id} for progress.",
-    }
 
 
 @router.post("/swap")
@@ -487,10 +698,7 @@ async def create_swap_job(
     cloth_color: Optional[str] = Form(None),
     cloth_strength: float = Form(0.6),
 ) -> dict:
-    """
-    Upload source photo and target video, start face swap job.
-    Returns job ID for status polling.
-    """
+    """Legacy standard swap endpoint."""
     if not source.content_type or not source.content_type.startswith("image/"):
         raise HTTPException(400, "Source must be an image (jpg, png)")
     if not target.content_type or "video" not in target.content_type:
@@ -541,7 +749,7 @@ async def create_swap_job(
     return {
         "job_id": job.id,
         "status": job.status.value,
-        "message": "Job started. Poll /api/status/{job_id} for progress.",
+        "message": "Job started. Poll /api/status/{job.id} for progress.",
     }
 
 
@@ -567,8 +775,14 @@ async def get_result(job_id: str):
 
     s = job.settings or {}
     engine = s.get("engine", "classic")
-    if s.get("multi_angle"):
-        suffix = "facefusion_hyperswap_1a_256_p256_multi"
+    preset = s.get("preset")
+    if preset:
+        enh = "enh1" if s.get("facefusion_face_enhancer") else "enh0"
+        suffix = f"{preset}_{s.get('facefusion_model', 'hyperswap_1a_256')}_p{s.get('facefusion_pixel_boost', '256')}_{enh}"
+    elif s.get("pro_mode"):
+        suffix = f"pro_{s.get('facefusion_model', 'hyperswap_1a_256')}_p{s.get('facefusion_pixel_boost', '256')}"
+    elif s.get("multi_angle"):
+        suffix = "multi_hyperswap_1a_256_p256"
     elif engine == "facefusion":
         suffix = _settings_suffix(
             "", 0, 1, 1, False, True,
