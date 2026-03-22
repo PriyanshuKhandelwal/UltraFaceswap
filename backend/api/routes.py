@@ -27,9 +27,20 @@ from backend.core.facefusion_runner import (
     check_output_has_swapped_faces,
 )
 from backend.core.frame_validator import validate_and_repair
+from backend.core.downloader import download_video, is_supported_url
 import cv2
 
 router = APIRouter(prefix="/api", tags=["face-swap"])
+
+DEFAULT_FACE_PATH = os.environ.get(
+    "DEFAULT_FACE_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "..", "assets", "default_face.png"),
+)
+
+def _get_default_face() -> Optional[str]:
+    """Return the absolute path to the default face image, or None."""
+    p = os.path.abspath(DEFAULT_FACE_PATH)
+    return p if os.path.isfile(p) else None
 
 OUTPUT_DIR = os.environ.get("ULTRAFACESWAP_OUTPUT", "/tmp/ultrafaceswap_output")
 
@@ -126,11 +137,16 @@ def _run_facefusion_task(
     preset: Optional[str] = None,
     two_pass: bool = True,
     source_paths: Optional[List[str]] = None,
+    temporal_smooth: bool = True,
+    _keep_source: bool = False,
 ) -> None:
     """Run FaceFusion subprocess for face swap with two-pass support and OOM fallback."""
     if not is_facefusion_available():
         job_store.update(job_id, status=JobStatus.FAILED, error="FaceFusion not configured. Set ULTRAFACESWAP_FACEFUSION_PATH.")
-        _cleanup_paths([source_path, target_path])
+        if not _keep_source:
+            _cleanup_paths([source_path, target_path])
+        else:
+            _cleanup_paths([target_path])
         return
 
     settings = {
@@ -282,6 +298,7 @@ def _run_facefusion_task(
                         source_path,
                         output_path,
                         source_paths=source_paths,
+                        temporal_smooth=temporal_smooth,
                         progress_callback=_on_validate_progress,
                     )
                     settings["validation"] = repair_result
@@ -301,9 +318,11 @@ def _run_facefusion_task(
         except Exception as e:
             job_store.update(job_id, status=JobStatus.FAILED, error=str(e))
     finally:
-        paths_to_clean = [source_path, target_path, cloth_video_path]
+        paths_to_clean = [target_path, cloth_video_path]
+        if not _keep_source:
+            paths_to_clean.insert(0, source_path)
         if source_paths:
-            paths_to_clean.extend(source_paths)
+            paths_to_clean.extend(p for p in source_paths if p != source_path or not _keep_source)
         _cleanup_paths(paths_to_clean)
 
 
@@ -326,6 +345,7 @@ async def create_swap_preset_job(
     target: UploadFile = File(...),
     preset: str = Form("best"),
     lip_sync: bool = Form(False),
+    temporal_smooth: bool = Form(True),
 ) -> dict:
     """
     Simple preset-based face swap. Presets: quick, best, max.
@@ -365,6 +385,7 @@ async def create_swap_preset_job(
             "face_mask_blur": cfg["face_mask_blur"],
             "two_pass": cfg["two_pass"],
             "preset": preset,
+            "temporal_smooth": temporal_smooth,
         },
     )
     thread.start()
@@ -378,6 +399,80 @@ async def create_swap_preset_job(
 
 
 # ---------------------------------------------------------------------------
+# URL-based endpoint (download from Instagram/Pinterest/TikTok + swap)
+# ---------------------------------------------------------------------------
+
+@router.post("/swap-from-url")
+async def create_swap_from_url_job(
+    url: str = Form(...),
+    preset: str = Form("best"),
+    source: Optional[UploadFile] = File(None),
+    temporal_smooth: bool = Form(True),
+) -> dict:
+    """Download video from URL and face swap with default or custom face.
+
+    Supports Instagram Reels, Pinterest pins, TikTok, YouTube, etc.
+    If no source face is uploaded, the default face image is used.
+    """
+    if not is_facefusion_available():
+        raise HTTPException(400, "FaceFusion not available.")
+    if not is_supported_url(url):
+        raise HTTPException(400, "URL not supported. Try Instagram, Pinterest, TikTok, or YouTube links.")
+
+    if source and source.content_type and source.content_type.startswith("image/"):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(source.filename or "img").suffix) as s:
+            shutil.copyfileobj(source.file, s)
+            source_path = s.name
+    else:
+        default = _get_default_face()
+        if not default:
+            raise HTTPException(400, "No source face uploaded and no default face configured.")
+        source_path = default
+
+    try:
+        target_path = download_video(url)
+    except Exception as exc:
+        if source_path != _get_default_face() and os.path.isfile(source_path):
+            os.unlink(source_path)
+        raise HTTPException(400, f"Could not download video: {exc}")
+
+    if preset not in PRESETS:
+        preset = "best"
+    cfg = PRESETS[preset]
+    job = job_store.create()
+
+    is_default_face = source_path == _get_default_face()
+
+    thread = threading.Thread(
+        target=_run_facefusion_task,
+        args=(job.id, source_path, target_path),
+        kwargs={
+            "facefusion_model": cfg["face_swapper_model"],
+            "facefusion_pixel_boost": cfg["pixel_boost"],
+            "facefusion_face_enhancer": cfg["face_enhancer"],
+            "facefusion_face_enhancer_blend": cfg["face_enhancer_blend"],
+            "face_detector_model": cfg["face_detector_model"],
+            "face_detector_score": cfg.get("face_detector_score", 0.35),
+            "face_selector_mode": cfg.get("face_selector_mode", "reference"),
+            "face_mask_blur": cfg["face_mask_blur"],
+            "two_pass": cfg["two_pass"],
+            "preset": preset,
+            "temporal_smooth": temporal_smooth,
+            "_keep_source": is_default_face,
+        },
+    )
+    thread.start()
+
+    return {
+        "job_id": job.id,
+        "status": job.status.value,
+        "preset": preset,
+        "source": "default" if is_default_face else "uploaded",
+        "message": f"Downloading & processing. Poll /api/status/{job.id} for progress.",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Multi-angle endpoint (now uses two-pass + retinaface by default)
 # ---------------------------------------------------------------------------
 
@@ -386,6 +481,7 @@ async def create_swap_multi_job(
     sources: List[UploadFile] = File(...),
     target: UploadFile = File(...),
     face_enhancer: bool = Form(True),
+    temporal_smooth: bool = Form(True),
 ) -> dict:
     """
     Multi-angle face swap: upload 1-5 source photos and target video.
@@ -433,6 +529,7 @@ async def create_swap_multi_job(
             "face_mask_blur": 0.3,
             "two_pass": face_enhancer,
             "source_paths": source_paths,
+            "temporal_smooth": temporal_smooth,
         },
     )
     thread.start()
@@ -463,6 +560,7 @@ async def create_swap_pro_job(
     face_selector_mode: Optional[str] = Form("reference"),
     face_mask_blur: Optional[float] = Form(0.3),
     two_pass: bool = Form(True),
+    temporal_smooth: bool = Form(True),
     cloth_color: Optional[str] = Form(None),
     cloth_strength: float = Form(0.6),
 ) -> dict:
@@ -502,6 +600,7 @@ async def create_swap_pro_job(
             "face_mask_blur": face_mask_blur,
             "pro_mode": True,
             "two_pass": two_pass and facefusion_face_enhancer,
+            "temporal_smooth": temporal_smooth,
         },
     )
     thread.start()

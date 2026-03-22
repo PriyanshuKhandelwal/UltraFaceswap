@@ -48,6 +48,8 @@ export default function App() {
   const [targetPreview, setTargetPreview] = useState(null)
   const [preset, setPreset] = useState('best')
   const [lipSync, setLipSync] = useState(false)
+  const [smoothRepair, setSmoothRepair] = useState(true)
+  const [videoUrl, setVideoUrl] = useState('')
   const [showAdvanced, setShowAdvanced] = useState(false)
 
   // Advanced overrides
@@ -159,6 +161,7 @@ export default function App() {
     form.append('target', target)
     form.append('preset', preset)
     form.append('lip_sync', lipSync)
+    form.append('temporal_smooth', smoothRepair)
     try {
       const res = await fetch(`${API_BASE}/swap-preset`, { method: 'POST', body: form })
       const data = await res.json()
@@ -190,6 +193,7 @@ export default function App() {
     form.append('face_selector_mode', advSelectorMode)
     form.append('face_mask_blur', String(advMaskBlur))
     form.append('two_pass', advTwoPass)
+    form.append('temporal_smooth', smoothRepair)
     try {
       const res = await fetch(`${API_BASE}/swap-pro`, { method: 'POST', body: form })
       const data = await res.json()
@@ -216,6 +220,7 @@ export default function App() {
     multiSources.forEach((file) => form.append('sources', file))
     form.append('target', multiTarget)
     form.append('face_enhancer', multiEnhancer)
+    form.append('temporal_smooth', smoothRepair)
     try {
       const res = await fetch(`${API_BASE}/swap-multi`, { method: 'POST', body: form })
       const data = await res.json()
@@ -225,6 +230,31 @@ export default function App() {
           : data.detail || 'Upload failed'
         throw new Error(typeof msg === 'string' ? msg : 'Upload failed')
       }
+      setJobId(data.job_id)
+      pollStatus(data.job_id)
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  const handleSubmitUrl = async (e) => {
+    e.preventDefault()
+    setError(null)
+    if (!videoUrl.trim()) {
+      setError('Please paste a video URL')
+      return
+    }
+    const form = new FormData()
+    form.append('url', videoUrl.trim())
+    form.append('preset', preset)
+    form.append('temporal_smooth', smoothRepair)
+    if (source) {
+      form.append('source', source)
+    }
+    try {
+      const res = await fetch(`${API_BASE}/swap-from-url`, { method: 'POST', body: form })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Upload failed')
       setJobId(data.job_id)
       pollStatus(data.job_id)
     } catch (e) {
@@ -293,6 +323,14 @@ export default function App() {
                 title={ffUnavailable ? 'FaceFusion required' : ''}
               >
                 Multi-angle{ffUnavailable ? ' (unavailable)' : ''}
+              </button>
+              <button
+                type="button"
+                style={{ ...styles.mainTab, ...(mainTab === 'url' ? styles.mainTabActive : {}), ...(ffUnavailable ? styles.tabDisabled : {}) }}
+                onClick={() => !ffUnavailable && setMainTab('url')}
+                title={ffUnavailable ? 'FaceFusion required' : ''}
+              >
+                From URL{ffUnavailable ? ' (unavailable)' : ''}
               </button>
             </div>
 
@@ -449,6 +487,10 @@ export default function App() {
                   <input type="checkbox" checked={lipSync} onChange={(e) => setLipSync(e.target.checked)} />
                   Lip sync (requires audio in video)
                 </label>
+                <label style={{ ...styles.checkbox, marginTop: 4 }}>
+                  <input type="checkbox" checked={smoothRepair} onChange={(e) => setSmoothRepair(e.target.checked)} />
+                  Smooth frame repair (fixes flickering with temporal blending)
+                </label>
 
                 {/* Advanced toggle */}
                 <button
@@ -531,6 +573,72 @@ export default function App() {
                   disabled={multiSources.length < 1 || multiSources.length > 5 || !multiTarget}
                 >
                   Start multi-angle swap
+                </button>
+              </form>
+            )}
+
+            {/* ===== URL TAB ===== */}
+            {mainTab === 'url' && (
+              <form onSubmit={handleSubmitUrl} style={styles.form}>
+                <p style={styles.optionDesc}>
+                  Paste a video link from Instagram, Pinterest, TikTok, or YouTube. The video will be downloaded and face-swapped automatically.
+                </p>
+
+                <div style={styles.option}>
+                  <label style={styles.optionLabel}>Video URL</label>
+                  <input
+                    type="url"
+                    placeholder="https://www.instagram.com/reel/..."
+                    value={videoUrl}
+                    onChange={(e) => setVideoUrl(e.target.value)}
+                    style={{ ...styles.select, width: '100%', padding: '0.6rem 0.75rem' }}
+                  />
+                </div>
+
+                <div style={{ ...styles.option, marginTop: 8 }}>
+                  <label style={styles.optionLabel}>Source face (optional — uses default if empty)</label>
+                  <div style={styles.dropZone}>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => setSource(e.target.files[0])}
+                      style={styles.hiddenInput}
+                    />
+                    {sourcePreview ? (
+                      <img src={sourcePreview} alt="Source" style={styles.previewImg} />
+                    ) : (
+                      <span style={styles.placeholder}>+ Add photo (optional)</span>
+                    )}
+                  </div>
+                  {source && <span style={styles.fileName}>{source.name}</span>}
+                </div>
+
+                {/* Preset cards */}
+                <div style={styles.presetRow}>
+                  {Object.entries(PRESETS).map(([key, p]) => (
+                    <div
+                      key={key}
+                      onClick={() => setPreset(key)}
+                      style={{
+                        ...styles.presetCard,
+                        ...(preset === key ? styles.presetCardActive : {}),
+                      }}
+                    >
+                      <strong>{p.label}</strong>
+                      <span style={styles.presetDesc}>{p.desc}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <label style={{ ...styles.checkbox, marginTop: 8 }}>
+                  <input type="checkbox" checked={smoothRepair} onChange={(e) => setSmoothRepair(e.target.checked)} />
+                  Smooth frame repair
+                </label>
+
+                {error && <p style={styles.error}>{error}</p>}
+
+                <button type="submit" style={styles.button} disabled={!videoUrl.trim()}>
+                  Download & swap face
                 </button>
               </form>
             )}

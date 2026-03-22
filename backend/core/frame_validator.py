@@ -71,6 +71,56 @@ def _create_feathered_mask(h: int, w: int, feather_ratio: float = 0.25) -> np.nd
     return mask[:, :, np.newaxis]
 
 
+def _extract_face_crop(frame: np.ndarray, face: Dict, expand: float = 0.45):
+    """Extract an expanded face region and its placement coordinates."""
+    h, w = frame.shape[:2]
+    bb = face["bbox"]
+    cx, cy = (bb[0] + bb[2]) // 2, (bb[1] + bb[3]) // 2
+    fw, fh = bb[2] - bb[0], bb[3] - bb[1]
+    ew, eh = int(fw * (1 + expand)), int(fh * (1 + expand))
+
+    sx1 = max(0, cx - ew // 2)
+    sy1 = max(0, cy - eh // 2)
+    sx2 = min(w, cx + ew // 2)
+    sy2 = min(h, cy + eh // 2)
+    crop = frame[sy1:sy2, sx1:sx2].copy()
+    return crop, (sx1, sy1, cx, cy)
+
+
+def _paste_face_crop(
+    target_frame: np.ndarray,
+    crop: np.ndarray,
+    src_origin: tuple,
+    dst_offset: tuple = (0, 0),
+) -> np.ndarray:
+    """Paste *crop* onto *target_frame* at *src_origin* shifted by *dst_offset*, with feathered blending."""
+    h, w = target_frame.shape[:2]
+    ch, cw = crop.shape[:2]
+    if ch < 20 or cw < 20:
+        return target_frame
+
+    tx1 = src_origin[0] + dst_offset[0]
+    ty1 = src_origin[1] + dst_offset[1]
+
+    c_x1 = max(0, -tx1)
+    c_y1 = max(0, -ty1)
+    d_x1 = max(0, tx1)
+    d_y1 = max(0, ty1)
+    pw = min(cw - c_x1, w - d_x1)
+    ph = min(ch - c_y1, h - d_y1)
+    if pw < 20 or ph < 20:
+        return target_frame
+
+    src = crop[c_y1:c_y1 + ph, c_x1:c_x1 + pw].astype(np.float32)
+    mask = _create_feathered_mask(ph, pw)
+
+    result = target_frame.copy()
+    dst = result[d_y1:d_y1 + ph, d_x1:d_x1 + pw].astype(np.float32)
+    blended = src * mask + dst * (1.0 - mask)
+    result[d_y1:d_y1 + ph, d_x1:d_x1 + pw] = np.clip(blended, 0, 255).astype(np.uint8)
+    return result
+
+
 def _repair_frame(
     bad_frame: np.ndarray,
     good_frame: np.ndarray,
@@ -83,21 +133,7 @@ def _repair_frame(
     If *bad_face* is provided, the paste position is adjusted to track
     the face's movement between the two frames.
     """
-    h, w = bad_frame.shape[:2]
-
-    gb = good_face["bbox"]
-    gcx, gcy = (gb[0] + gb[2]) // 2, (gb[1] + gb[3]) // 2
-    gw, gh = gb[2] - gb[0], gb[3] - gb[1]
-    ew, eh = int(gw * (1 + expand)), int(gh * (1 + expand))
-
-    sx1 = max(0, gcx - ew // 2)
-    sy1 = max(0, gcy - eh // 2)
-    sx2 = min(w, gcx + ew // 2)
-    sy2 = min(h, gcy + eh // 2)
-    crop = good_frame[sy1:sy2, sx1:sx2].copy()
-    ch, cw = crop.shape[:2]
-    if ch < 20 or cw < 20:
-        return bad_frame
+    crop, (sx1, sy1, gcx, gcy) = _extract_face_crop(good_frame, good_face, expand)
 
     dx, dy = 0, 0
     if bad_face is not None:
@@ -105,25 +141,53 @@ def _repair_frame(
         bcx, bcy = (bb[0] + bb[2]) // 2, (bb[1] + bb[3]) // 2
         dx, dy = bcx - gcx, bcy - gcy
 
-    tx1, ty1 = sx1 + dx, sy1 + dy
+    return _paste_face_crop(bad_frame, crop, (sx1, sy1), (dx, dy))
 
-    c_x1 = max(0, -tx1)
-    c_y1 = max(0, -ty1)
-    d_x1 = max(0, tx1)
-    d_y1 = max(0, ty1)
-    pw = min(cw - c_x1, w - d_x1)
-    ph = min(ch - c_y1, h - d_y1)
-    if pw < 20 or ph < 20:
-        return bad_frame
 
-    src = crop[c_y1:c_y1 + ph, c_x1:c_x1 + pw].astype(np.float32)
-    mask = _create_feathered_mask(ph, pw)
+def _repair_frame_interpolated(
+    bad_frame: np.ndarray,
+    prev_frame: np.ndarray,
+    next_frame: np.ndarray,
+    prev_face: Dict,
+    next_face: Dict,
+    bad_face: Optional[Dict],
+    t: float,
+    expand: float = 0.45,
+) -> np.ndarray:
+    """Repair using weighted blend of prev and next good frames.
 
-    result = bad_frame.copy()
-    dst = result[d_y1:d_y1 + ph, d_x1:d_x1 + pw].astype(np.float32)
-    blended = src * mask + dst * (1.0 - mask)
-    result[d_y1:d_y1 + ph, d_x1:d_x1 + pw] = np.clip(blended, 0, 255).astype(np.uint8)
-    return result
+    *t* is 0.0 at *prev_frame* and 1.0 at *next_frame*.
+    The face crop position is linearly interpolated, and the pixel
+    content is alpha-blended between the two sources.
+    """
+    crop_a, (ax1, ay1, acx, acy) = _extract_face_crop(prev_frame, prev_face, expand)
+    crop_b, (bx1, by1, bcx, bcy) = _extract_face_crop(next_frame, next_face, expand)
+
+    ch = min(crop_a.shape[0], crop_b.shape[0])
+    cw = min(crop_a.shape[1], crop_b.shape[1])
+    if ch < 20 or cw < 20:
+        return _repair_frame(bad_frame, prev_frame, prev_face, bad_face, expand)
+
+    crop_a = cv2.resize(crop_a, (cw, ch))
+    crop_b = cv2.resize(crop_b, (cw, ch))
+    blended_crop = ((1.0 - t) * crop_a.astype(np.float32) +
+                    t * crop_b.astype(np.float32))
+    blended_crop = np.clip(blended_crop, 0, 255).astype(np.uint8)
+
+    interp_x1 = int(ax1 * (1 - t) + bx1 * t)
+    interp_y1 = int(ay1 * (1 - t) + by1 * t)
+    interp_cx = int(acx * (1 - t) + bcx * t)
+    interp_cy = int(acy * (1 - t) + bcy * t)
+
+    dx, dy = 0, 0
+    if bad_face is not None:
+        bb = bad_face["bbox"]
+        face_cx = (bb[0] + bb[2]) // 2
+        face_cy = (bb[1] + bb[3]) // 2
+        dx = face_cx - interp_cx
+        dy = face_cy - interp_cy
+
+    return _paste_face_crop(bad_frame, blended_crop, (interp_x1, interp_y1), (dx, dy))
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +255,19 @@ def _merge_frames(frames_dir: str, output_path: str, fps: float, audio_path: Opt
 # Public API
 # ---------------------------------------------------------------------------
 
+def _group_consecutive_runs(indices: List[int]) -> List[List[int]]:
+    """Group a sorted list of indices into runs of consecutive integers."""
+    if not indices:
+        return []
+    runs: List[List[int]] = [[indices[0]]]
+    for i in indices[1:]:
+        if i == runs[-1][-1] + 1:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    return runs
+
+
 def validate_and_repair(
     source_img_path: str,
     output_video_path: str,
@@ -198,6 +275,7 @@ def validate_and_repair(
     source_paths: Optional[List[str]] = None,
     similarity_threshold: float = 0.3,
     max_neighbor_distance: int = 15,
+    temporal_smooth: bool = True,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> Dict:
     """Validate every frame and repair ones where the swap failed.
@@ -205,6 +283,10 @@ def validate_and_repair(
     Uses InsightFace face recognition to compare each output frame's face
     against the source.  Frames that don't match are repaired by blending
     the face region from the nearest successfully-swapped neighbor.
+
+    When *temporal_smooth* is True, consecutive bad frames between two good
+    anchors are repaired with linearly interpolated face blending instead of
+    copying from a single neighbor.  This avoids the "frozen face" artifact.
 
     Modifies *output_video_path* in-place if repairs are needed.
 
@@ -214,6 +296,7 @@ def validate_and_repair(
         source_paths: Additional source images (multi-angle).
         similarity_threshold: Cosine similarity below this marks a bad frame.
         max_neighbor_distance: Skip repair if nearest good frame is farther.
+        temporal_smooth: Interpolate between two good neighbors for smoother repair.
         progress_callback: ``callback(stage, current, total)``
 
     Returns:
@@ -320,48 +403,118 @@ def validate_and_repair(
     frames_dir = tempfile.mkdtemp(prefix="uf_repair_")
     audio_path = os.path.join(frames_dir, "audio.aac")
 
+    good_set = set(good_indices)
+
     try:
         _extract_frames_to_dir(output_video_path, frames_dir)
         has_audio = _extract_audio(output_video_path, audio_path)
         video_fps = _get_fps(output_video_path)
 
         frame_files = sorted(Path(frames_dir).glob("frame_*.png"))
+        n_frames = len(frame_files)
 
         repaired = 0
         failed = 0
+        progress_done = 0
+        total_bad = len(bad_indices)
 
-        for j, bad_idx in enumerate(bad_indices):
-            nearest_good = min(good_indices, key=lambda g: abs(g - bad_idx))
-            distance = abs(nearest_good - bad_idx)
+        if temporal_smooth:
+            runs = _group_consecutive_runs(sorted(bad_indices))
+            for run in runs:
+                prev_good = max((g for g in good_indices if g < run[0]), default=None)
+                next_good = min((g for g in good_indices if g > run[-1]), default=None)
 
-            if distance > max_neighbor_distance:
-                failed += 1
+                prev_dist = (run[0] - prev_good) if prev_good is not None else float("inf")
+                next_dist = (next_good - run[-1]) if next_good is not None else float("inf")
+                span = (run[-1] - run[0]) + 1
+
+                if min(prev_dist, next_dist) > max_neighbor_distance:
+                    failed += span
+                    progress_done += span
+                    if progress_callback:
+                        progress_callback("repairing", progress_done, total_bad)
+                    continue
+
+                has_both = (prev_good is not None and next_good is not None
+                            and prev_dist <= max_neighbor_distance
+                            and next_dist <= max_neighbor_distance)
+
+                if has_both:
+                    prev_img = cv2.imread(str(frame_files[prev_good]))
+                    next_img = cv2.imread(str(frame_files[next_good]))
+                    total_gap = next_good - prev_good
+                else:
+                    anchor = prev_good if prev_good is not None and prev_dist <= max_neighbor_distance else next_good
+                    anchor_img = cv2.imread(str(frame_files[anchor]))
+
+                for bad_idx in run:
+                    if bad_idx >= n_frames:
+                        failed += 1
+                        progress_done += 1
+                        continue
+
+                    bad_img = cv2.imread(str(frame_files[bad_idx]))
+                    if bad_img is None:
+                        failed += 1
+                        progress_done += 1
+                        continue
+
+                    bad_face = frame_data[bad_idx].get("face_info")
+
+                    if has_both and prev_img is not None and next_img is not None:
+                        t = (bad_idx - prev_good) / total_gap if total_gap > 0 else 0.5
+                        fixed = _repair_frame_interpolated(
+                            bad_img, prev_img, next_img,
+                            frame_data[prev_good]["face_info"],
+                            frame_data[next_good]["face_info"],
+                            bad_face, t,
+                        )
+                    else:
+                        a_face = frame_data[anchor]["face_info"]
+                        if anchor_img is not None and a_face is not None:
+                            fixed = _repair_frame(bad_img, anchor_img, a_face, bad_face)
+                        else:
+                            failed += 1
+                            progress_done += 1
+                            continue
+
+                    cv2.imwrite(str(frame_files[bad_idx]), fixed)
+                    repaired += 1
+                    progress_done += 1
+
+                    if progress_callback:
+                        progress_callback("repairing", progress_done, total_bad)
+        else:
+            for j, bad_idx in enumerate(bad_indices):
+                nearest_good = min(good_indices, key=lambda g: abs(g - bad_idx))
+                distance = abs(nearest_good - bad_idx)
+
+                if distance > max_neighbor_distance:
+                    failed += 1
+                    if progress_callback:
+                        progress_callback("repairing", j + 1, total_bad)
+                    continue
+
+                if bad_idx >= n_frames or nearest_good >= n_frames:
+                    failed += 1
+                    continue
+
+                bad_img = cv2.imread(str(frame_files[bad_idx]))
+                good_img = cv2.imread(str(frame_files[nearest_good]))
+                if bad_img is None or good_img is None:
+                    failed += 1
+                    continue
+
+                fixed = _repair_frame(
+                    bad_img, good_img,
+                    frame_data[nearest_good]["face_info"],
+                    frame_data[bad_idx].get("face_info"),
+                )
+                cv2.imwrite(str(frame_files[bad_idx]), fixed)
+                repaired += 1
+
                 if progress_callback:
-                    progress_callback("repairing", j + 1, len(bad_indices))
-                continue
-
-            if bad_idx >= len(frame_files) or nearest_good >= len(frame_files):
-                failed += 1
-                continue
-
-            bad_frame = cv2.imread(str(frame_files[bad_idx]))
-            good_frame = cv2.imread(str(frame_files[nearest_good]))
-            if bad_frame is None or good_frame is None:
-                failed += 1
-                continue
-
-            repaired_frame = _repair_frame(
-                bad_frame,
-                good_frame,
-                frame_data[nearest_good]["face_info"],
-                frame_data[bad_idx].get("face_info"),
-            )
-
-            cv2.imwrite(str(frame_files[bad_idx]), repaired_frame)
-            repaired += 1
-
-            if progress_callback:
-                progress_callback("repairing", j + 1, len(bad_indices))
+                    progress_callback("repairing", j + 1, total_bad)
 
         result["repaired_frames"] = repaired
         result["failed_frames"] = failed
@@ -377,7 +530,8 @@ def validate_and_repair(
         pct_good = len(good_indices) / actual_total * 100
         parts = [f"{len(good_indices)}/{actual_total} frames ({pct_good:.0f}%) swapped correctly."]
         if repaired > 0:
-            parts.append(f"{repaired} frames repaired using neighboring frames.")
+            mode = "with temporal smoothing" if temporal_smooth else "from neighbors"
+            parts.append(f"{repaired} frames repaired {mode}.")
         if failed > 0:
             parts.append(
                 f"{failed} frames could not be repaired (nearest good frame too far). "

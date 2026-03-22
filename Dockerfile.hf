@@ -1,0 +1,60 @@
+# UltraFaceswap — Hugging Face Spaces (Docker + T4 GPU)
+# Build: docker build -f Dockerfile.hf -t ultrafaceswap .
+FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 python3-pip python3.10-venv \
+    ffmpeg git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python3 && \
+    ln -sf /usr/bin/python3.10 /usr/bin/python
+
+WORKDIR /app
+
+# Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+    torch torchvision --index-url https://download.pytorch.org/whl/cu121 && \
+    pip install --no-cache-dir \
+    numpy opencv-python-headless Pillow \
+    insightface onnxruntime-gpu \
+    fastapi uvicorn python-multipart python-dotenv \
+    tqdm \
+    yt-dlp \
+    python-telegram-bot
+
+# Clone FaceFusion
+RUN git clone --depth 1 https://github.com/facefusion/facefusion.git /app/facefusion && \
+    cd /app/facefusion && pip install --no-cache-dir -r requirements.txt || true
+
+# Copy application code
+COPY backend/ backend/
+COPY assets/ assets/
+COPY frontend/dist/ frontend/dist/
+COPY run_api.py .
+
+# Create dirs
+RUN mkdir -p /app/models /tmp/ultrafaceswap_output
+
+# Environment
+ENV ULTRAFACESWAP_MODELS=/app/models
+ENV ULTRAFACESWAP_OUTPUT=/tmp/ultrafaceswap_output
+ENV ULTRAFACESWAP_FACEFUSION_PATH=/app/facefusion
+ENV DEFAULT_FACE_PATH=/app/assets/default_face.png
+ENV PORT=7860
+
+# HF Spaces expects port 7860
+EXPOSE 7860
+
+# HF Spaces runs as user 1000
+RUN useradd -m -u 1000 user
+RUN chown -R user:user /app /tmp/ultrafaceswap_output
+USER user
+
+CMD ["python3", "-m", "uvicorn", "backend.api.main:app", "--host", "0.0.0.0", "--port", "7860"]
